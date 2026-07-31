@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/services/theme_provider.dart';
+import '../categories/categories_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -42,7 +43,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
     setState(() => _isLoading = false);
     if(mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Saved!')));
+    
   }
+  
 
   @override
   Widget build(BuildContext context) {
@@ -57,6 +60,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
           : ListView(
+              
               padding: const EdgeInsets.all(16),
               children: [
                 Text('Financial Logic', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: subTextColor)),
@@ -80,6 +84,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ],
                     ),
                   ),
+                ),
+
+                ListTile(
+                  leading: const Icon(Icons.category_outlined),
+                  title: const Text('Manage Categories'),
+                  subtitle: const Text('Add or delete income and expense categories'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => const CategoriesScreen(),
+                      ),
+                    );
+                  },
                 ),
 
                 const SizedBox(height: 30),
