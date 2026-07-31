@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:intl/intl.dart';
+import '../../core/models/category_model.dart';
+import '../../core/services/category_service.dart';
 import 'itemization_screen.dart';
 
 class ExpenseEntryScreen extends StatefulWidget {
@@ -11,181 +12,245 @@ class ExpenseEntryScreen extends StatefulWidget {
 }
 
 class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
-  // Controllers
+  final _formKey = GlobalKey<FormState>();
   final _amountController = TextEditingController();
-  final _templateNameController = TextEditingController();
-  
-  // State Variables
+  final _noteController = TextEditingController();
+
+  final CategoryService _categoryService = CategoryService();
+  final SupabaseClient _supabase = Supabase.instance.client;
+
+  List<CategoryModel> _categories = [];
+  List<Map<String, dynamic>> _accounts = [];
+
+  CategoryModel? _selectedCategory;
+  String? _selectedAccountId;
   DateTime _selectedDate = DateTime.now();
   bool _isLoading = false;
-  bool _saveAsTemplate = false;
-  String _currencySymbol = '\$'; // NEW: Default Currency Symbol
-
-  // Data Lists
-  List<Map<String, dynamic>> _categories = [];
-  List<Map<String, dynamic>> _templates = [];
-  List<Map<String, dynamic>> _accounts = [];
-  List<Map<String, dynamic>> _currentBreakdown = []; 
-  
-  // Selections
-  int? _selectedCategoryId;
-  int? _selectedAccountId;
+  bool _isCategoriesLoading = true;
 
   @override
   void initState() {
     super.initState();
-    _loadData();
+    _loadInitialData();
   }
 
-  // NEW: Load Data
-  Future<void> _loadData() async {
-    await Future.wait([
-      _fetchCurrencySymbol(),
-      _fetchCategories(),
-      _fetchTemplates(),
-      _fetchAccounts(),
-    ]);
+  @override
+  void dispose() {
+    _amountController.dispose();
+    _noteController.dispose();
+    super.dispose();
   }
 
-  // NEW: Fetch currency symbol
-  Future<void> _fetchCurrencySymbol() async {
-    final userId = Supabase.instance.client.auth.currentUser!.id;
-    final profileData = await Supabase.instance.client
-        .from('profiles')
-        .select('currency_symbol')
-        .eq('id', userId)
-        .maybeSingle();
+  Future<void> _loadInitialData() async {
+    setState(() => _isCategoriesLoading = true);
+    try {
+      final fetchedCategories = await _categoryService.getCategories('expense');
+      
+      final userId = _supabase.auth.currentUser?.id;
+      List<Map<String, dynamic>> fetchedAccounts = [];
+      if (userId != null) {
+        final accResponse = await _supabase
+            .from('accounts')
+            .select()
+            .eq('user_id', userId);
+        fetchedAccounts = List<Map<String, dynamic>>.from(accResponse);
+      }
 
-    if (mounted) {
       setState(() {
-        _currencySymbol = profileData?['currency_symbol'] as String? ?? '\$';
+        _categories = fetchedCategories;
+        _accounts = fetchedAccounts;
+        if (_categories.isNotEmpty) {
+          _selectedCategory = _categories.first;
+        }
+        if (_accounts.isNotEmpty) {
+          _selectedAccountId = _accounts.first['id']?.toString();
+        }
+        _isCategoriesLoading = false;
       });
+    } catch (e) {
+      setState(() => _isCategoriesLoading = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error loading data: $e')),
+        );
+      }
     }
   }
 
-  Future<void> _fetchCategories() async {
-    final userId = Supabase.instance.client.auth.currentUser!.id;
-    final data = await Supabase.instance.client.from('categories').select().eq('user_id', userId);
-    if (mounted) {
-      setState(() => _categories = List<Map<String, dynamic>>.from(data));
-    }
-  }
+  // --- TEMPLATES WORKFLOW ---
+  Future<List<Map<String, dynamic>>> _fetchExpenseTemplates() async {
+    final userId = _supabase.auth.currentUser?.id;
+    if (userId == null) return [];
 
-  Future<void> _fetchTemplates() async {
-    final userId = Supabase.instance.client.auth.currentUser!.id;
-    final data = await Supabase.instance.client
+    final response = await _supabase
         .from('expense_templates')
         .select()
-        .eq('user_id', userId)
-        .order('created_at');
-    if (mounted) {
-      setState(() => _templates = List<Map<String, dynamic>>.from(data));
-    }
+        .eq('user_id', userId);
+
+    return List<Map<String, dynamic>>.from(response);
   }
 
-  Future<void> _fetchAccounts() async {
-    final userId = Supabase.instance.client.auth.currentUser!.id;
-    var data = await Supabase.instance.client.from('accounts').select().eq('user_id', userId);
+  void _showTemplatePicker() async {
+    final templates = await _fetchExpenseTemplates();
 
-    if (mounted) {
-      setState(() {
-        _accounts = List<Map<String, dynamic>>.from(data);
-        if (_accounts.isNotEmpty) { 
-          final defaultAccount = _accounts.firstWhere(
-            (acc) => acc['type'] == 'wallet',
-            orElse: () => _accounts.first,
-          );
-          _selectedAccountId = defaultAccount['id'];
-        }
-      });
-    }
+    if (!mounted) return;
+
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => Container(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'Select Expense Template',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
+                      ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close),
+                  onPressed: () => Navigator.pop(ctx),
+                ),
+              ],
+            ),
+            const Divider(),
+            if (templates.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 30),
+                child: Center(
+                  child: Text('No saved expense templates found.'),
+                ),
+              )
+            else
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: templates.length,
+                  itemBuilder: (context, index) {
+                    final template = templates[index];
+                    return ListTile(
+                      leading: const CircleAvatar(
+                        child: Icon(Icons.bookmark_outline, size: 20),
+                      ),
+                      title: Text(
+                        template['name'] ?? 'Unnamed Template',
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      subtitle: Text(
+                        '${template['category'] ?? 'General'} • \$${template['amount'] ?? '0.00'}',
+                      ),
+                      onTap: () {
+                        _applyTemplate(template);
+                        Navigator.pop(ctx);
+                      },
+                    );
+                  },
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
   }
 
   void _applyTemplate(Map<String, dynamic> template) {
     setState(() {
-      _amountController.text = template['total_amount'].toString();
-      _selectedCategoryId = template['category_id'];
+      if (template['amount'] != null) {
+        _amountController.text = template['amount'].toString();
+      }
+      if (template['notes'] != null || template['name'] != null) {
+        _noteController.text = template['notes'] ?? template['name'] ?? '';
+      }
       
-      // Load breakdown if it exists
-      if (template['breakdown'] != null) {
-        _currentBreakdown = List<Map<String, dynamic>>.from(template['breakdown']);
-      } else {
-        _currentBreakdown = [];
+      final matchedCategory = _categories.firstWhere(
+        (c) => c.name.toLowerCase() == (template['category'] ?? '').toString().toLowerCase(),
+        orElse: () => _categories.isNotEmpty ? _categories.first : _selectedCategory!,
+      );
+      _selectedCategory = matchedCategory;
+
+      if (template['account_id'] != null) {
+        _selectedAccountId = template['account_id'].toString();
       }
     });
-    
+
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Applied template: "${template['name']}"'), duration: const Duration(seconds: 1)),
+      SnackBar(content: Text('Applied "${template['name'] ?? 'Template'}"')),
     );
   }
 
-  Future<void> _openItemization() async {
-    if (_selectedCategoryId == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Select a Category first')));
+  void _openItemizationScreen() async {
+    if (_selectedCategory == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please select a category first')),
+      );
       return;
     }
 
-    final categoryName = _categories.firstWhere((c) => c['id'] == _selectedCategoryId)['name'];
-
-    final result = await Navigator.push(
+    final double? calculatedTotal = await Navigator.push<double>(
       context,
       MaterialPageRoute(
-        builder: (_) => ItemizationScreen(
-          categoryId: _selectedCategoryId!, 
-          categoryName: categoryName,
-          initialBreakdown: _currentBreakdown.isNotEmpty ? _currentBreakdown : null,
+        builder: (context) => ItemizationScreen(
+          categoryId: _selectedCategory!.id, // ✅ Pass String directly (do not use int.tryParse)
+          categoryName: _selectedCategory!.name,
         ),
       ),
     );
 
-    if (result != null && result is Map) {
+    if (calculatedTotal != null && calculatedTotal > 0) {
       setState(() {
-        _amountController.text = (result['total'] as double).toStringAsFixed(2);
-        _currentBreakdown = List<Map<String, dynamic>>.from(result['breakdown']);
+        _amountController.text = calculatedTotal.toStringAsFixed(2);
       });
     }
   }
 
-  Future<void> _saveExpense() async {
-    if (_amountController.text.isEmpty || _selectedCategoryId == null || _selectedAccountId == null) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please fill all fields')));
+  // --- SUBMIT EXPENSE ---
+  Future<void> _submitExpense() async {
+    if (!_formKey.currentState!.validate()) return;
+    if (_selectedCategory == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please select a category')),
+      );
       return;
     }
-    
+
     setState(() => _isLoading = true);
-    final userId = Supabase.instance.client.auth.currentUser!.id;
 
     try {
-      // 1. Save Transaction
-      await Supabase.instance.client.from('transactions').insert({
+      final userId = _supabase.auth.currentUser?.id;
+      if (userId == null) throw 'User not authenticated';
+
+      final amount = double.parse(_amountController.text);
+
+      await _supabase.from('expenses').insert({
         'user_id': userId,
-        'type': 'expense',
-        'amount': double.parse(_amountController.text),
-        'category_id': _selectedCategoryId,
-        'account_id': _selectedAccountId, // <--- LINKED TO ACCOUNT
+        'amount': amount,
+        'category_id': _selectedCategory!.id,
+        'category_name': _selectedCategory!.name,
+        'account_id': _selectedAccountId,
+        'note': _noteController.text.trim(),
         'date': _selectedDate.toIso8601String(),
-        'description': _currentBreakdown.isNotEmpty 
-            ? _currentBreakdown.map((e) => "${e['name']}: ${e['amount']}").join(", ") 
-            : null,
       });
 
-      // 2. Save as Template (if checked)
-      if (_saveAsTemplate && _templateNameController.text.isNotEmpty) {
-        await Supabase.instance.client.from('expense_templates').insert({
-          'user_id': userId,
-          'name': _templateNameController.text,
-          'category_id': _selectedCategoryId,
-          'total_amount': double.parse(_amountController.text),
-          'breakdown': _currentBreakdown,
-        });
-      }
-
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Expense Saved!')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Expense logged successfully!')),
+        );
         Navigator.pop(context);
       }
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to save expense: $e')),
+        );
+      }
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -193,175 +258,149 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Filter templates based on selected category
-    final visibleTemplates = _selectedCategoryId == null 
-        ? <Map<String, dynamic>>[] 
-        : _templates.where((t) => t['category_id'] == _selectedCategoryId).toList();
-
     return Scaffold(
-      appBar: AppBar(title: const Text('Add Expense')),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // 1. Amount Input
-            // UPDATED INPUT: Use dynamic currency symbol for prefix
-            TextField(
-              controller: _amountController,
-              keyboardType: const TextInputType.numberWithOptions(decimal: true),
-              decoration: InputDecoration(
-                labelText: 'Total Amount',
-                prefixText: '$_currencySymbol ', // USE DYNAMIC SYMBOL
-                border: const OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 20),
-
-            // 2. Paid From (Account Selector)
-            DropdownButtonFormField<int>(
-              value: _selectedAccountId,
-              decoration: const InputDecoration(labelText: 'Paid From', border: OutlineInputBorder()),
-              items: _accounts.map((acc) {
-                final isWallet = acc['type'] == 'wallet';
-                return DropdownMenuItem<int>(
-                  value: acc['id'],
-                  child: Row(
-                    children: [
-                      Icon(isWallet ? Icons.wallet : Icons.account_balance, size: 16, color: Colors.grey),
-                      const SizedBox(width: 10),
-                      Text(acc['name']),
-                    ],
-                  ),
-                );
-              }).toList(),
-              onChanged: (val) => setState(() => _selectedAccountId = val),
-            ),
-            const SizedBox(height: 20),
-
-            // 3. Category Dropdown
-            DropdownButtonFormField<int>(
-              value: _selectedCategoryId,
-              decoration: const InputDecoration(labelText: 'Category', border: OutlineInputBorder()),
-              items: _categories.map((cat) {
-                return DropdownMenuItem<int>(
-                  value: cat['id'],
-                  child: Text(cat['name']),
-                );
-              }).toList(),
-              onChanged: (val) => setState(() => _selectedCategoryId = val),
-            ),
-            
-            // 4. Templates List (Appears if Category matches saved templates)
-            if (visibleTemplates.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              const Text('Quick Fill (Templates):', style: TextStyle(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 5),
-              SizedBox(
-                height: 40,
-                child: ListView.builder(
-                  scrollDirection: Axis.horizontal,
-                  itemCount: visibleTemplates.length,
-                  itemBuilder: (context, index) {
-                    final t = visibleTemplates[index];
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 8.0),
-                      child: ActionChip(
-                        avatar: const Icon(Icons.copy, size: 14, color: Colors.blue),
-                        // UPDATED DISPLAY: Use dynamic currency symbol
-                        label: Text('${t['name']} ($_currencySymbol${t['total_amount']})'), 
-                        onPressed: () => _applyTemplate(t),
-                        backgroundColor: Colors.blue.shade50,
-                        padding: EdgeInsets.zero,
+      appBar: AppBar(
+        title: const Text('Add Expense'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.style_outlined),
+            tooltip: 'Apply Template',
+            onPressed: _showTemplatePicker,
+          ),
+        ],
+      ),
+      body: _isCategoriesLoading
+          ? const Center(child: CircularProgressIndicator())
+          : SingleChildScrollView(
+              padding: const EdgeInsets.all(20.0),
+              child: Form(
+                key: _formKey,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Amount Field & Itemize Action
+                    TextFormField(
+                      controller: _amountController,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                      decoration: InputDecoration(
+                        labelText: 'Amount',
+                        prefixText: '\$ ',
+                        border: const OutlineInputBorder(),
+                        suffixIcon: IconButton(
+                          icon: const Icon(Icons.receipt_long_outlined),
+                          tooltip: 'Itemize Expense',
+                          onPressed: _openItemizationScreen,
+                        ),
                       ),
-                    );
-                  },
-                ),
-              ),
-            ],
+                      validator: (value) {
+                        if (value == null || value.isEmpty) {
+                          return 'Please enter an amount';
+                        }
+                        if (double.tryParse(value) == null) {
+                          return 'Enter a valid number';
+                        }
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 20),
 
-            const SizedBox(height: 20),
-
-            // 5. Smart Breakdown Button
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: _openItemization,
-                icon: const Icon(Icons.list_alt),
-                label: Text(_currentBreakdown.isEmpty 
-                  ? 'Smart Breakdown (Itemize)' 
-                  : 'Edit Breakdown (${_currentBreakdown.length} items)'),
-              ),
-            ),
-            
-            const SizedBox(height: 20),
-            
-            // 6. Date Picker
-            ListTile(
-              title: Text('Date: ${DateFormat.yMMMd().format(_selectedDate)}'),
-              trailing: const Icon(Icons.calendar_today),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: const BorderSide(color: Colors.grey)),
-              onTap: () async {
-                final picked = await showDatePicker(
-                  context: context,
-                  initialDate: _selectedDate,
-                  firstDate: DateTime(2020),
-                  lastDate: DateTime(2030),
-                );
-                if (picked != null) setState(() => _selectedDate = picked);
-              },
-            ),
-
-            const SizedBox(height: 20),
-
-            // 7. Save as Template Option
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: Colors.grey.shade100,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.grey.shade300),
-              ),
-              child: Column(
-                children: [
-                  CheckboxListTile(
-                    title: const Text('Save as new Template?'),
-                    subtitle: const Text('For future one-tap entry'),
-                    value: _saveAsTemplate,
-                    onChanged: (val) => setState(() => _saveAsTemplate = val!),
-                    contentPadding: EdgeInsets.zero,
-                  ),
-                  if (_saveAsTemplate)
-                    TextField(
-                      controller: _templateNameController,
+                    // Category Dropdown
+                    DropdownButtonFormField<CategoryModel>(
+                      initialValue: _selectedCategory,
+                      value: _selectedCategory,
                       decoration: const InputDecoration(
-                        labelText: 'Template Name',
-                        hintText: 'e.g. Morning Commute',
+                        labelText: 'Category',
                         border: OutlineInputBorder(),
-                        filled: true,
-                        fillColor: Colors.white,
-                        isDense: true,
+                        prefixIcon: Icon(Icons.category_outlined),
+                      ),
+                      items: _categories.map((cat) {
+                        return DropdownMenuItem(
+                          value: cat,
+                          child: Text(cat.name),
+                        );
+                      }).toList(),
+                      onChanged: (val) {
+                        setState(() => _selectedCategory = val);
+                      },
+                      validator: (val) => val == null ? 'Select a category' : null,
+                    ),
+                    const SizedBox(height: 20),
+
+                    // Account Dropdown (if accounts exist)
+                    if (_accounts.isNotEmpty) ...[
+                      DropdownButtonFormField<String>(
+                        initialValue: _selectedAccountId,
+                        value: _selectedAccountId,
+                        decoration: const InputDecoration(
+                          labelText: 'Account',
+                          border: OutlineInputBorder(),
+                          prefixIcon: Icon(Icons.account_balance_wallet_outlined),
+                        ),
+                        items: _accounts.map((acc) {
+                          return DropdownMenuItem(
+                            value: acc['id']?.toString(),
+                            child: Text(acc['name'] ?? 'Account'),
+                          );
+                        }).toList(),
+                        onChanged: (val) {
+                          setState(() => _selectedAccountId = val);
+                        },
+                      ),
+                      const SizedBox(height: 20),
+                    ],
+
+                    // Note Field
+                    TextFormField(
+                      controller: _noteController,
+                      decoration: const InputDecoration(
+                        labelText: 'Note / Description',
+                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.notes_outlined),
                       ),
                     ),
-                ],
+                    const SizedBox(height: 20),
+
+                    // Date Picker Tile
+                    ListTile(
+                      shape: RoundedRectangleBorder(
+                        side: const BorderSide(color: Colors.grey),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      leading: const Icon(Icons.calendar_today_outlined),
+                      title: Text(
+                        'Date: ${_selectedDate.year}-${_selectedDate.month.toString().padLeft(2, '0')}-${_selectedDate.day.toString().padLeft(2, '0')}',
+                      ),
+                      trailing: const Icon(Icons.edit),
+                      onTap: () async {
+                        final picked = await showDatePicker(
+                          context: context,
+                          initialDate: _selectedDate,
+                          firstDate: DateTime(2000),
+                          lastDate: DateTime(2100),
+                        );
+                        if (picked != null) {
+                          setState(() => _selectedDate = picked);
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 30),
+
+                    // Save Button
+                    SizedBox(
+                      width: double.infinity,
+                      height: 50,
+                      child: ElevatedButton(
+                        onPressed: _isLoading ? null : _submitExpense,
+                        child: _isLoading
+                            ? const CircularProgressIndicator(color: Colors.white)
+                            : const Text('Save Expense', style: TextStyle(fontSize: 16)),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
-
-            const SizedBox(height: 20),
-
-            // 8. Save Button
-            SizedBox(
-              width: double.infinity,
-              height: 50,
-              child: ElevatedButton(
-                onPressed: _isLoading ? null : _saveExpense,
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white),
-                child: _isLoading ? const CircularProgressIndicator() : const Text('Save Expense'),
-              ),
-            ),
-          ],
-        ),
-      ),
     );
   }
 }
