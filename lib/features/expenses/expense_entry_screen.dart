@@ -188,7 +188,6 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
     );
   }
 
-  // --- SAVE AS TEMPLATE ---
   Future<void> _saveAsTemplate() async {
     if (_selectedCategory == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -229,14 +228,21 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
         final userId = _supabase.auth.currentUser?.id;
         if (userId == null) throw 'User not authenticated';
 
-        await _supabase.from('expense_templates').insert({
+        final amountVal = double.tryParse(_amountController.text);
+        final noteVal = _noteController.text.trim();
+
+        // Safe insert payload
+        final Map<String, dynamic> payload = {
           'user_id': userId,
           'name': templateName,
-          'amount': double.tryParse(_amountController.text),
           'category': _selectedCategory!.name,
-          'account_id': _selectedAccountId,
-          'notes': _noteController.text.trim(),
-        });
+        };
+
+        if (amountVal != null) payload['amount'] = amountVal;
+        if (_selectedAccountId != null) payload['account_id'] = _selectedAccountId;
+        if (noteVal.isNotEmpty) payload['notes'] = noteVal;
+
+        await _supabase.from('expense_templates').insert(payload);
 
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -252,7 +258,7 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
       }
     }
   }
-
+  
   void _openItemizationScreen() async {
     if (_selectedCategory == null) {
       ScaffoldMessenger.of(context).showSnackBar(
