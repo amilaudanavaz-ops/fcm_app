@@ -34,8 +34,8 @@ class _ItemizationScreenState extends State<ItemizationScreen> {
   @override
   void initState() {
     super.initState();
-    _addItem(name: 'Tea', amount: '100');
-    _addItem(name: 'Bun', amount: '200');
+    // ✅ FIX: Start with one empty item instead of "Tea" and "Bun"
+    _addItem(name: '', amount: '');
   }
 
   @override
@@ -72,25 +72,38 @@ class _ItemizationScreenState extends State<ItemizationScreen> {
     return total;
   }
 
+  // ✅ FIX: Process the breakdown and return BOTH total and text
+  void _autoSaveAndPop() {
+    final total = _calculateTotal();
+    
+    // Format the valid items into a readable string (e.g., "- Milk: $4.00")
+    final breakdownText = _items
+        .where((item) => item.nameController.text.trim().isNotEmpty && item.amountController.text.trim().isNotEmpty)
+        .map((item) => '- ${item.nameController.text.trim()}: \$${item.amountController.text.trim()}')
+        .join('\n');
+
+    Navigator.pop(context, {
+      'total': total,
+      'breakdown': breakdownText,
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final currentTotal = _calculateTotal();
 
     return PopScope(
-      canPop: true, // ✅ Allow normal popping
+      canPop: false, // ✅ Block default pop to ensure we pass our custom map
       onPopInvokedWithResult: (didPop, result) {
-        // If popped via system back gesture/button, pass calculated total
         if (didPop) return;
+        _autoSaveAndPop();
       },
       child: Scaffold(
         appBar: AppBar(
           title: Text('${widget.categoryName} Breakdown'),
           leading: IconButton(
             icon: const Icon(Icons.arrow_back),
-            onPressed: () {
-              // Explicitly pass total when back button in AppBar is clicked
-              Navigator.pop(context, _calculateTotal());
-            },
+            onPressed: _autoSaveAndPop, // ✅ Trigger safe pop
           ),
         ),
         body: Padding(
@@ -151,7 +164,7 @@ class _ItemizationScreenState extends State<ItemizationScreen> {
               TextButton.icon(
                 onPressed: () => _addItem(),
                 icon: const Icon(Icons.add),
-                label: const Text('Create New Sub-Item'),
+                label: const Text('Add Sub-Item'),
               ),
 
               const SizedBox(height: 10),
