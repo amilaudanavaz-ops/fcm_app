@@ -161,7 +161,7 @@ class _CategoriesScreenState extends State<CategoriesScreen> with SingleTickerPr
     if (categories.isEmpty) {
       return Center(
         child: Text(
-          'No ${type} categories added yet.',
+          'No $type categories added yet.',
           style: const TextStyle(color: Colors.grey),
         ),
       );

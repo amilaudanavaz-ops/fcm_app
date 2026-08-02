@@ -170,11 +170,13 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
         _noteController.text = template['notes'] ?? template['name'] ?? '';
       }
       
-      final matchedCategory = _categories.firstWhere(
-        (c) => c.name.toLowerCase() == (template['category'] ?? '').toString().toLowerCase(),
-        orElse: () => _categories.isNotEmpty ? _categories.first : _selectedCategory!,
-      );
-      _selectedCategory = matchedCategory;
+      if (_categories.isNotEmpty) {
+        final matchedCategory = _categories.firstWhere(
+          (c) => c.name.toLowerCase() == (template['category'] ?? '').toString().toLowerCase(),
+          orElse: () => _categories.first,
+        );
+        _selectedCategory = matchedCategory;
+      }
 
       if (template['account_id'] != null) {
         _selectedAccountId = template['account_id'].toString();
@@ -198,7 +200,7 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
       context,
       MaterialPageRoute(
         builder: (context) => ItemizationScreen(
-          categoryId: _selectedCategory!.id, // ✅ Pass String directly (do not use int.tryParse)
+          categoryId: _selectedCategory!.id,
           categoryName: _selectedCategory!.name,
         ),
       ),
@@ -211,50 +213,95 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
     }
   }
 
-  // --- SUBMIT EXPENSE ---
   Future<void> _submitExpense() async {
-    if (!_formKey.currentState!.validate()) return;
-    if (_selectedCategory == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please select a category')),
-      );
-      return;
-    }
-
-    setState(() => _isLoading = true);
-
-    try {
-      final userId = _supabase.auth.currentUser?.id;
-      if (userId == null) throw 'User not authenticated';
-
-      final amount = double.parse(_amountController.text);
-
-      await _supabase.from('expenses').insert({
-        'user_id': userId,
-        'amount': amount,
-        'category_id': _selectedCategory!.id,
-        'category_name': _selectedCategory!.name,
-        'account_id': _selectedAccountId,
-        'note': _noteController.text.trim(),
-        'date': _selectedDate.toIso8601String(),
-      });
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Expense logged successfully!')),
-        );
-        Navigator.pop(context);
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to save expense: $e')),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
-    }
+  if (!_formKey.currentState!.validate()) return;
+  if (_selectedCategory == null) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Please select a category')),
+    );
+    return;
   }
+
+  setState(() => _isLoading = true);
+
+  try {
+    final userId = _supabase.auth.currentUser?.id;
+    if (userId == null) throw 'User not authenticated';
+
+    final amount = double.parse(_amountController.text);
+    final noteText = _noteController.text.trim();
+    final isoDate = _selectedDate.toIso8601String();
+
+    // 1. Insert into 'expenses' table
+    await _supabase.from('expenses').insert({
+      'user_id': userId,
+      'amount': amount,
+      'category_id': _selectedCategory!.id,
+      'category': _selectedCategory!.name,
+      'category_name': _selectedCategory!.name,
+      'account_id': _selectedAccountId,
+      'title': noteText.isNotEmpty ? noteText : _selectedCategory!.name,
+      'description': noteText,
+      'note': noteText,
+      'date': isoDate,
+    });
+
+    // 2. Insert into 'transactions' table (CRITICAL: Required for Dashboard, History, & Graphs)
+    await _supabase.from('transactions').insert({
+      'user_id': userId,
+      'amount': amount,
+      'type': 'expense',
+      'category': _selectedCategory!.name,
+      'category_id': _selectedCategory!.id,
+      'account_id': _selectedAccountId != null ? int.tryParse(_selectedAccountId!) ?? _selectedAccountId : null,
+      'title': noteText.isNotEmpty ? noteText : _selectedCategory!.name,
+      'description': noteText,
+      'date': isoDate,
+    });
+
+    // 3. Update target account balance
+    if (_selectedAccountId != null) {
+      try {
+        final accountData = await _supabase
+            .from('accounts')
+            .select('id, current_balance, balance')
+            .eq('id', _selectedAccountId!)
+            .single();
+
+        if (accountData['current_balance'] != null) {
+          final currentBal = (accountData['current_balance'] as num).toDouble();
+          await _supabase
+              .from('accounts')
+              .update({'current_balance': currentBal - amount})
+              .eq('id', _selectedAccountId!);
+        } else if (accountData['balance'] != null) {
+          final currentBal = (accountData['balance'] as num).toDouble();
+          await _supabase
+              .from('accounts')
+              .update({'balance': currentBal - amount})
+              .eq('id', _selectedAccountId!);
+        }
+      } catch (accError) {
+        debugPrint('Account balance update skipped: $accError');
+      }
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Expense logged successfully!')),
+      );
+      Navigator.pop(context, true);
+    }
+  } catch (e) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to save expense: $e')),
+      );
+    }
+  } finally {
+    if (mounted) setState(() => _isLoading = false);
+  }
+}
 
   @override
   Widget build(BuildContext context) {
@@ -308,7 +355,6 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
                     // Category Dropdown
                     DropdownButtonFormField<CategoryModel>(
                       initialValue: _selectedCategory,
-                      value: _selectedCategory,
                       decoration: const InputDecoration(
                         labelText: 'Category',
                         border: OutlineInputBorder(),
@@ -331,7 +377,6 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
                     if (_accounts.isNotEmpty) ...[
                       DropdownButtonFormField<String>(
                         initialValue: _selectedAccountId,
-                        value: _selectedAccountId,
                         decoration: const InputDecoration(
                           labelText: 'Account',
                           border: OutlineInputBorder(),

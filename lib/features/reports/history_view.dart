@@ -151,7 +151,7 @@ class _HistoryViewState extends State<HistoryView> {
               if (_typeFilter != 'income') ...[
                 const SizedBox(height: 10),
                 DropdownButtonFormField<int>(
-                  value: _selectedCategoryId,
+                  initialValue: _selectedCategoryId,
                   decoration: const InputDecoration(
                     labelText: 'Filter by Specific Category',
                     contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 0),

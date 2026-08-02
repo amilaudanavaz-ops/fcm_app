@@ -27,7 +27,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   double _expenseMTD = 0.0;
   double _pendingTotal = 0.0; 
   bool _isLoading = true;
-  String _currencySymbol = '\$'; // NEW: Default Currency Symbol
+  String _currencySymbol = '\$';
 
   final PageController _pageController = PageController(viewportFraction: 0.9);
   int _currentPage = 0;
@@ -38,8 +38,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _checkInitialSetup();
   }
 
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
+
   Future<void> _checkInitialSetup() async {
-    final userId = Supabase.instance.client.auth.currentUser!.id;
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    if (userId == null) return;
+
     try {
       final response = await Supabase.instance.client
           .from('transactions')
@@ -61,139 +69,183 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Future<void> _fetchDashboardMetrics() async {
-    setState(() => _isLoading = true);
-    final userId = Supabase.instance.client.auth.currentUser!.id;
+  setState(() => _isLoading = true);
+  final userId = Supabase.instance.client.auth.currentUser?.id;
+  if (userId == null) return;
 
-    try {
-      // NEW: Fetch currency symbol first
-      final profileData = await Supabase.instance.client
-          .from('profiles')
-          .select('currency_symbol')
-          .eq('id', userId)
-          .maybeSingle();
+  try {
+    // 1. Fetch Profile Currency
+    final profileData = await Supabase.instance.client
+        .from('profiles')
+        .select('currency_symbol')
+        .eq('id', userId)
+        .maybeSingle();
 
-      final symbol = profileData?['currency_symbol'] as String? ?? '\$';
-      
-      final accountsData = await Supabase.instance.client
-          .from('accounts')
-          .select('id, type')
-          .eq('user_id', userId);
+    final symbol = profileData?['currency_symbol'] as String? ?? '\$';
 
-      final Map<int, String> accountTypes = {
-        for (var item in accountsData) item['id'] as int: item['type'] as String
-      };
+    // 2. Fetch Accounts
+    final accountsData = await Supabase.instance.client
+        .from('accounts')
+        .select('id, type, current_balance, balance')
+        .eq('user_id', userId);
 
-      final txData = await Supabase.instance.client
-          .from('transactions')
-          .select('type, amount, date, account_id')
-          .eq('user_id', userId);
+    final Map<String, String> accountTypes = {
+      for (var item in accountsData)
+        item['id'].toString(): (item['type'] ?? 'wallet').toString()
+    };
 
-      final transferData = await Supabase.instance.client
-          .from('transfers')
-          .select('from_account_id, to_account_id, amount')
-          .eq('user_id', userId);
-      
-      final savedData = await Supabase.instance.client
-          .from('commitments')
-          .select('amount, transactions(account_id)')
-          .eq('user_id', userId)
-          .eq('status', 'deposited');
-      
-      final pendingData = await Supabase.instance.client
-          .from('commitments')
-          .select('amount')
-          .eq('user_id', userId)
-          .eq('status', 'pending');
+    double walletDirect = 0.0;
+    double bankDirect = 0.0;
+    bool hasAccountBalances = false;
 
-      double incomeWallet = 0, expenseWallet = 0;
-      double incomeBank = 0, expenseBank = 0;
-      double mtdExpense = 0;
-      final now = DateTime.now();
-
-      // Process Transactions
-      for (var tx in txData) {
-        final amt = (tx['amount'] as num).toDouble();
-        final date = DateTime.parse(tx['date']);
-        final acctId = tx['account_id'];
-        final acctType = accountTypes[acctId] ?? 'wallet'; 
-
-        if (tx['type'] == 'income' || tx['type'] == 'initial_balance') {
-          if (acctType == 'wallet') incomeWallet += amt;
-          if (acctType == 'bank') incomeBank += amt;
-        } else {
-          // Expense
-          if (acctType == 'wallet') expenseWallet += amt;
-          if (acctType == 'bank') expenseBank += amt;
-          if (date.year == now.year && date.month == now.month) {
-            mtdExpense += amt;
-          }
-        }
+    for (var acc in accountsData) {
+      final bal = ((acc['current_balance'] ?? acc['balance']) as num?)?.toDouble() ?? 0.0;
+      if (acc['current_balance'] != null || acc['balance'] != null) {
+        hasAccountBalances = true;
       }
-
-      // Process Transfers
-      for (var tr in transferData) {
-        final amt = (tr['amount'] as num).toDouble();
-        final fromId = tr['from_account_id'];
-        final toId = tr['to_account_id'];
-        final fromType = accountTypes[fromId];
-        final toType = accountTypes[toId];
-
-        if (fromType == 'wallet') incomeWallet -= amt;
-        if (fromType == 'bank') incomeBank -= amt;
-        if (toType == 'wallet') incomeWallet += amt;
-        if (toType == 'bank') incomeBank += amt;
+      final type = (acc['type'] ?? 'wallet').toString();
+      if (type == 'wallet') {
+        walletDirect += bal;
+      } else {
+        bankDirect += bal;
       }
-
-      // Process Savings (Logic B: Deduct from Spendable)
-      double totalSaved = 0;
-      for (var s in savedData) {
-        final amt = (s['amount'] as num).toDouble();
-        totalSaved += amt;
-
-        final sourceTx = s['transactions'] as Map<String, dynamic>?;
-        if (sourceTx != null && sourceTx['account_id'] != null) {
-          final sourceAcctId = sourceTx['account_id'] as int;
-          final acctType = accountTypes[sourceAcctId];
-
-          if (acctType == 'wallet') {
-            incomeWallet -= amt;
-          } else if (acctType == 'bank') {
-            incomeBank -= amt;
-          }
-        }
-      }
-
-      double pending = 0;
-      for (var p in pendingData) {
-        pending += (p['amount'] as num).toDouble();
-      }
-
-      if (mounted) {
-        setState(() {
-          _currencySymbol = symbol; // SET CURRENCY SYMBOL
-          _walletBalance = incomeWallet - expenseWallet;
-          _bankBalance = incomeBank - expenseBank;
-          _netWorth = _walletBalance + _bankBalance + totalSaved; 
-          _totalSaved = totalSaved;
-          _pendingTotal = pending;
-          _expenseMTD = mtdExpense;
-          _isLoading = false;
-        });
-      }
-    } catch (e) {
-      if (mounted) setState(() => _isLoading = false);
-      debugPrint('Error: $e');
     }
+
+    // 3. Fetch Transactions
+    final txData = await Supabase.instance.client
+        .from('transactions')
+        .select('type, amount, date, account_id')
+        .eq('user_id', userId);
+
+    // 4. Fetch Expenses specifically for MTD
+    final expensesData = await Supabase.instance.client
+        .from('expenses')
+        .select('amount, date')
+        .eq('user_id', userId);
+
+    // 5. Fetch Transfers
+    final transferData = await Supabase.instance.client
+        .from('transfers')
+        .select('from_account_id, to_account_id, amount')
+        .eq('user_id', userId);
+
+    // 6. Fetch Commitments
+    final savedData = await Supabase.instance.client
+        .from('commitments')
+        .select('amount, transactions(account_id)')
+        .eq('user_id', userId)
+        .eq('status', 'deposited');
+
+    final pendingData = await Supabase.instance.client
+        .from('commitments')
+        .select('amount')
+        .eq('user_id', userId)
+        .eq('status', 'pending');
+
+    double incomeWallet = 0, expenseWallet = 0;
+    double incomeBank = 0, expenseBank = 0;
+    double mtdExpense = 0;
+    final now = DateTime.now();
+
+    // Calculate MTD Expenses directly from both 'expenses' and 'transactions' tables
+    final Set<String> processedKeys = {}; // Prevent double counting
+
+    for (var exp in expensesData) {
+      final amt = (exp['amount'] as num?)?.toDouble() ?? 0.0;
+      final dateStr = exp['date']?.toString();
+      if (dateStr != null) {
+        final date = DateTime.tryParse(dateStr) ?? now;
+        if (date.year == now.year && date.month == now.month) {
+          mtdExpense += amt;
+        }
+      }
+    }
+
+    // Process Transactions for cash balances
+    for (var tx in txData) {
+      final amt = (tx['amount'] as num?)?.toDouble() ?? 0.0;
+      final acctId = tx['account_id']?.toString() ?? '';
+      final acctType = accountTypes[acctId] ?? 'wallet';
+      final type = tx['type']?.toString();
+
+      if (type == 'income' || type == 'initial_balance') {
+        if (acctType == 'wallet') incomeWallet += amt;
+        if (acctType == 'bank') incomeBank += amt;
+      } else if (type == 'expense') {
+        if (acctType == 'wallet') expenseWallet += amt;
+        if (acctType == 'bank') expenseBank += amt;
+      }
+    }
+
+    // Process Transfers
+    for (var tr in transferData) {
+      final amt = (tr['amount'] as num?)?.toDouble() ?? 0.0;
+      final fromId = tr['from_account_id']?.toString() ?? '';
+      final toId = tr['to_account_id']?.toString() ?? '';
+      final fromType = accountTypes[fromId];
+      final toType = accountTypes[toId];
+
+      if (fromType == 'wallet') incomeWallet -= amt;
+      if (fromType == 'bank') incomeBank -= amt;
+      if (toType == 'wallet') incomeWallet += amt;
+      if (toType == 'bank') incomeBank += amt;
+    }
+
+    // Process Savings
+    double totalSaved = 0;
+    for (var s in savedData) {
+      final amt = (s['amount'] as num?)?.toDouble() ?? 0.0;
+      totalSaved += amt;
+
+      final sourceTx = s['transactions'] as Map<String, dynamic>?;
+      if (sourceTx != null && sourceTx['account_id'] != null) {
+        final sourceAcctId = sourceTx['account_id'].toString();
+        final acctType = accountTypes[sourceAcctId];
+
+        if (acctType == 'wallet') {
+          incomeWallet -= amt;
+        } else if (acctType == 'bank') {
+          incomeBank -= amt;
+        }
+      }
+    }
+
+    double pending = 0;
+    for (var p in pendingData) {
+      pending += (p['amount'] as num?)?.toDouble() ?? 0.0;
+    }
+
+    if (mounted) {
+      setState(() {
+        _currencySymbol = symbol;
+        _walletBalance = hasAccountBalances ? walletDirect : (incomeWallet - expenseWallet);
+        _bankBalance = hasAccountBalances ? bankDirect : (incomeBank - expenseBank);
+        _netWorth = _walletBalance + _bankBalance + totalSaved;
+        _totalSaved = totalSaved;
+        _pendingTotal = pending;
+        _expenseMTD = mtdExpense;
+        _isLoading = false;
+      });
+    }
+  } catch (e) {
+    if (mounted) setState(() => _isLoading = false);
+    debugPrint('Error fetching dashboard metrics: $e');
   }
+}
 
   Future<void> _signOut() async {
     await Supabase.instance.client.auth.signOut();
-    if (mounted) Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => const LoginScreen()));
+    if (mounted) {
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => const LoginScreen()),
+      );
+    }
   }
 
   void _openSettings() {
-    // Refresh data after settings screen might change currency
-    Navigator.of(context).push(MaterialPageRoute(builder: (_) => const SettingsScreen())).then((_) => _fetchDashboardMetrics());
+    Navigator.of(context)
+        .push(MaterialPageRoute(builder: (_) => const SettingsScreen()))
+        .then((_) => _fetchDashboardMetrics());
   }
 
   Widget _buildBalanceCard(BuildContext context, {
@@ -219,21 +271,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
         margin: const EdgeInsets.symmetric(horizontal: 5),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(24),
-          border: Border.all(color: Colors.white.withOpacity(0.15), width: 1),
-          color: glowColor.withOpacity(0.05),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.15), width: 1),
+          color: glowColor.withValues(alpha: 0.05),
           gradient: RadialGradient(
             center: Alignment.center,
             radius: 1.4,
             colors: [
               Colors.transparent,               
-              glowColor.withOpacity(0.0), 
-              glowColor.withOpacity(0.3), 
+              glowColor.withValues(alpha: 0.0), 
+              glowColor.withValues(alpha: 0.3), 
             ],
             stops: const [0.0, 0.6, 1.0], 
           ),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.05),
+              color: Colors.black.withValues(alpha: 0.05),
               blurRadius: 20,
               offset: const Offset(0, 10),
             )
@@ -246,17 +298,34 @@ class _DashboardScreenState extends State<DashboardScreen> {
             children: [
               Icon(icon, color: Colors.white, size: 30),
               const SizedBox(height: 8),
-              Text(title, style: const TextStyle(color: Colors.white70, fontSize: 13, letterSpacing: 1.1, fontWeight: FontWeight.w500)),
+              Text(
+                title, 
+                style: const TextStyle(
+                  color: Colors.white70, 
+                  fontSize: 13, 
+                  letterSpacing: 1.1, 
+                  fontWeight: FontWeight.w500
+                ),
+              ),
               const SizedBox(height: 4),
               _isLoading
-                  ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-                  // UPDATED DISPLAY: Use dynamic currency symbol
-                  : Text('$_currencySymbol${amount.toStringAsFixed(2)}', style: const TextStyle(color: Colors.white, fontSize: 32, fontWeight: FontWeight.bold)),
+                  ? const SizedBox(
+                      height: 20, 
+                      width: 20, 
+                      child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)
+                    )
+                  : Text(
+                      '$_currencySymbol${amount.toStringAsFixed(2)}', 
+                      style: const TextStyle(color: Colors.white, fontSize: 32, fontWeight: FontWeight.bold)
+                    ),
               if (onTap != null) ...[
                 const SizedBox(height: 12),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(color: Colors.white.withOpacity(0.1), borderRadius: BorderRadius.circular(20)),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.1), 
+                    borderRadius: BorderRadius.circular(20)
+                  ),
                   child: const Text('Manage', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
                 )
               ]
@@ -276,9 +345,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
           color: Colors.white,
           borderRadius: BorderRadius.circular(24),
           boxShadow: [
-            BoxShadow(color: color.withOpacity(0.15), blurRadius: 15, offset: const Offset(0, 8))
+            BoxShadow(color: color.withValues(alpha: 0.15), blurRadius: 15, offset: const Offset(0, 8))
           ],
-          border: Border.all(color: color.withOpacity(0.1), width: 1),
+          border: Border.all(color: color.withValues(alpha: 0.1), width: 1),
         ),
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 20.0, horizontal: 24.0),
@@ -287,16 +356,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
             children: [
               Container(
                 padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(color: color.withOpacity(0.1), shape: BoxShape.circle),
+                decoration: BoxDecoration(color: color.withValues(alpha: 0.1), shape: BoxShape.circle),
                 child: Icon(icon, color: color, size: 24),
               ),
               const SizedBox(height: 10),
-              Text(title, style: TextStyle(color: Colors.grey.shade600, fontSize: 13, letterSpacing: 1.1, fontWeight: FontWeight.w600)),
+              Text(
+                title, 
+                style: TextStyle(color: Colors.grey.shade600, fontSize: 13, letterSpacing: 1.1, fontWeight: FontWeight.w600)
+              ),
               const SizedBox(height: 4),
               _isLoading
                   ? CircularProgressIndicator(color: color)
-                  // UPDATED DISPLAY: Use dynamic currency symbol
-                  : Text('$_currencySymbol${amount.toStringAsFixed(2)}', style: TextStyle(color: Colors.grey.shade900, fontSize: 32, fontWeight: FontWeight.bold)),
+                  : Text(
+                      '$_currencySymbol${amount.toStringAsFixed(2)}', 
+                      style: TextStyle(color: Colors.grey.shade900, fontSize: 32, fontWeight: FontWeight.bold)
+                    ),
               if (onTap != null) ...[
                 const SizedBox(height: 12),
                 Text('Tap to manage', style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.bold)),
@@ -332,7 +406,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
         children: [
           FloatingActionButton.extended(
             heroTag: 'expense_btn',
-            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ExpenseEntryScreen())).then((_) => _fetchDashboardMetrics()),
+            onPressed: () async {
+              final res = await Navigator.push(
+                context, 
+                MaterialPageRoute(builder: (_) => const ExpenseEntryScreen())
+              );
+              if (res == true || mounted) {
+                _fetchDashboardMetrics();
+              }
+            },
             label: const Text('Expense'),
             icon: const Icon(Icons.remove),
             backgroundColor: isGlass ? Colors.white : Colors.red.shade700,
@@ -341,7 +423,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
           const SizedBox(width: 10),
           FloatingActionButton.extended(
             heroTag: 'income_btn',
-            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const IncomeEntryScreen())).then((_) => _fetchDashboardMetrics()),
+            onPressed: () async {
+              final res = await Navigator.push(
+                context, 
+                MaterialPageRoute(builder: (_) => const IncomeEntryScreen())
+              );
+              if (res == true || mounted) {
+                _fetchDashboardMetrics();
+              }
+            },
             label: const Text('Income'),
             icon: const Icon(Icons.add),
             backgroundColor: isGlass ? Colors.white : Colors.green.shade700,
@@ -384,10 +474,33 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         controller: _pageController,
                         onPageChanged: (index) => setState(() => _currentPage = index),
                         children: [
-                          _buildBalanceCard(context, title: 'NET WORTH', amount: _netWorth, color: Colors.blueAccent, icon: Icons.monetization_on_outlined),
-                          _buildBalanceCard(context, title: 'WALLET CASH', amount: _walletBalance, color: const Color(0xFF00C853), icon: Icons.wallet),
-                          _buildBalanceCard(context, title: 'BANK ACCOUNTS', amount: _bankBalance, color: const Color(0xFF6200EA), icon: Icons.account_balance,
-                            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AccountsScreen())).then((_) => _fetchDashboardMetrics()),
+                          _buildBalanceCard(
+                            context, 
+                            title: 'NET WORTH', 
+                            amount: _netWorth, 
+                            color: Colors.blueAccent, 
+                            icon: Icons.monetization_on_outlined
+                          ),
+                          _buildBalanceCard(
+                            context, 
+                            title: 'WALLET CASH', 
+                            amount: _walletBalance, 
+                            color: const Color(0xFF00C853), 
+                            icon: Icons.wallet
+                          ),
+                          _buildBalanceCard(
+                            context, 
+                            title: 'BANK ACCOUNTS', 
+                            amount: _bankBalance, 
+                            color: const Color(0xFF6200EA), 
+                            icon: Icons.account_balance,
+                            onTap: () async {
+                              await Navigator.push(
+                                context, 
+                                MaterialPageRoute(builder: (_) => const AccountsScreen())
+                              );
+                              _fetchDashboardMetrics();
+                            },
                           ),
                         ],
                       ),
@@ -404,7 +517,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         height: 8,
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(4),
-                          color: _currentPage == index ? Colors.white : Colors.white.withOpacity(0.4),
+                          color: _currentPage == index ? Colors.white : Colors.white.withValues(alpha: 0.4),
                         ),
                       )),
                     ),
@@ -415,30 +528,46 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       padding: const EdgeInsets.symmetric(horizontal: 16),
                       child: Row(
                         children: [
-                          // UPDATED DISPLAY: Use dynamic currency symbol
-                          Expanded(child: _buildMetricTile('Total Saved', '$_currencySymbol${_totalSaved.toStringAsFixed(0)}', Colors.green, isGlass)),
-                          // UPDATED DISPLAY: Use dynamic currency symbol
+                          Expanded(
+                            child: _buildMetricTile(
+                              'Total Saved', 
+                              '$_currencySymbol${_totalSaved.toStringAsFixed(0)}', 
+                              Colors.green, 
+                              isGlass
+                            )
+                          ),
                           const SizedBox(width: 10),
-                          Expanded(child: _buildMetricTile('Expense (MTD)', '$_currencySymbol${_expenseMTD.toStringAsFixed(0)}', Colors.red, isGlass)),
+                          Expanded(
+                            child: _buildMetricTile(
+                              'Expense (MTD)', 
+                              '$_currencySymbol${_expenseMTD.toStringAsFixed(0)}', 
+                              Colors.red, 
+                              isGlass
+                            )
+                          ),
                         ],
                       ),
                     ),
 
                     const SizedBox(height: 20),
 
-                    // --- BUTTONS ---
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 16),
                       child: _buildActionCard(
                         'Commitment Hub', 
                         _pendingTotal > 0 
-                            // UPDATED DISPLAY: Use dynamic currency symbol
                             ? 'Action Required: $_currencySymbol${_pendingTotal.toStringAsFixed(2)}' 
                             : 'All caught up!',
                         Icons.savings_outlined, 
                         Colors.orange, 
                         isGlass,
-                        () => Navigator.push(context, MaterialPageRoute(builder: (_) => const CommitmentHubScreen())).then((_) => _fetchDashboardMetrics()),
+                        () async {
+                          await Navigator.push(
+                            context, 
+                            MaterialPageRoute(builder: (_) => const CommitmentHubScreen())
+                          );
+                          _fetchDashboardMetrics();
+                        },
                         subtitleColor: _pendingTotal > 0 ? Colors.redAccent : null,
                       ),
                     ),
@@ -453,7 +582,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         Icons.bar_chart_rounded, 
                         colorScheme.primary, 
                         isGlass,
-                        () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ReportsScreen()))
+                        () async {
+                          await Navigator.push(
+                            context, 
+                            MaterialPageRoute(builder: (_) => const ReportsScreen())
+                          );
+                          _fetchDashboardMetrics();
+                        }
                       ),
                     ),
                   ],
@@ -470,10 +605,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: isGlass ? Colors.white.withOpacity(0.1) : Colors.white,
+        color: isGlass ? Colors.white.withValues(alpha: 0.1) : Colors.white,
         borderRadius: BorderRadius.circular(16),
         border: isGlass ? Border.all(color: Colors.white12) : Border.all(color: Colors.grey.shade200),
-        boxShadow: isGlass ? [] : [BoxShadow(color: Colors.black.withOpacity(0.03), blurRadius: 10)],
+        boxShadow: isGlass ? [] : [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10)],
       ),
       child: Column(
         children: [
@@ -485,15 +620,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  Widget _buildActionCard(String title, String subtitle, IconData icon, Color color, bool isGlass, VoidCallback onTap, {Color? subtitleColor}) {
-    // Determine subtitle color based on context and alert status
+  Widget _buildActionCard(
+    String title, 
+    String subtitle, 
+    IconData icon, 
+    Color color, 
+    bool isGlass, 
+    VoidCallback onTap, 
+    {Color? subtitleColor}
+  ) {
     final subColor = subtitleColor ?? (isGlass ? Colors.white60 : Colors.grey.shade600);
 
     return Card(
-      color: isGlass ? Colors.white.withOpacity(0.1) : Colors.white,
+      color: isGlass ? Colors.white.withValues(alpha: 0.1) : Colors.white,
       elevation: isGlass ? 0 : 2,
-      shadowColor: Colors.black.withOpacity(0.05),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: isGlass ? const BorderSide(color: Colors.white12) : BorderSide.none),
+      shadowColor: Colors.black.withValues(alpha: 0.05),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16), 
+        side: isGlass ? const BorderSide(color: Colors.white12) : BorderSide.none
+      ),
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(16),
@@ -504,7 +649,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: isGlass ? Colors.white24 : color.withOpacity(0.1),
+                  color: isGlass ? Colors.white24 : color.withValues(alpha: 0.1),
                   shape: BoxShape.circle,
                 ),
                 child: Icon(icon, color: isGlass ? Colors.white : color),
@@ -514,8 +659,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(title, style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: isGlass ? Colors.white : Colors.grey.shade900)),
-                    Text(subtitle, style: TextStyle(color: subColor, fontWeight: subtitleColor != null ? FontWeight.bold : FontWeight.normal)),
+                    Text(
+                      title, 
+                      style: TextStyle(
+                        fontSize: 16, 
+                        fontWeight: FontWeight.bold, 
+                        color: isGlass ? Colors.white : Colors.grey.shade900
+                      )
+                    ),
+                    Text(
+                      subtitle, 
+                      style: TextStyle(
+                        color: subColor, 
+                        fontWeight: subtitleColor != null ? FontWeight.bold : FontWeight.normal
+                      )
+                    ),
                   ],
                 ),
               ),

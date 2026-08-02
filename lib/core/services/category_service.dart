@@ -35,7 +35,7 @@ class CategoryService {
         .select()
         .single();
 
-    return CategoryModel.fromJson(response as Map<String, dynamic>);
+    return CategoryModel.fromJson(response);
   }
 
   /// Delete a category by ID

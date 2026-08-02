@@ -148,7 +148,7 @@ class _IncomeEntryScreenState extends State<IncomeEntryScreen> {
 
               // Account Selector
               DropdownButtonFormField<int>(
-                value: _selectedAccountId,
+                initialValue: _selectedAccountId,
                 decoration: const InputDecoration(labelText: 'Deposit To (Wallet/Bank)', border: OutlineInputBorder()),
                 items: _accounts.map((acc) {
                   return DropdownMenuItem<int>(
