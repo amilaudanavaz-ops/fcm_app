@@ -200,6 +200,7 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
 
     final templateName = await showDialog<String>(
       context: context,
+      barrierDismissible: false, // Prevents accidental freeze
       builder: (ctx) => AlertDialog(
         title: const Text('Save as Template'),
         content: TextField(
@@ -207,16 +208,23 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
           autofocus: true,
           decoration: const InputDecoration(
             labelText: 'Template Name',
-            hintText: 'e.g., Weekly Groceries',
+            hintText: 'e.g., Travel Template',
           ),
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
+            onPressed: () {
+              FocusScope.of(ctx).unfocus(); // Dismiss keyboard
+              Navigator.pop(ctx);
+            },
             child: const Text('Cancel'),
           ),
           ElevatedButton(
-            onPressed: () => Navigator.pop(ctx, templateNameController.text.trim()),
+            onPressed: () {
+              FocusScope.of(ctx).unfocus(); // Dismiss keyboard FIRST
+              final text = templateNameController.text.trim();
+              Navigator.pop(ctx, text);
+            },
             child: const Text('Save'),
           ),
         ],
@@ -224,21 +232,24 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
     );
 
     if (templateName != null && templateName.isNotEmpty) {
+      setState(() => _isLoading = true);
+
       try {
         final userId = _supabase.auth.currentUser?.id;
         if (userId == null) throw 'User not authenticated';
 
-        final amountVal = double.tryParse(_amountController.text);
+        final amountVal = double.tryParse(_amountController.text) ?? 0.0;
         final noteVal = _noteController.text.trim();
 
-        // Safe insert payload
         final Map<String, dynamic> payload = {
           'user_id': userId,
           'name': templateName,
+          'category_id': _selectedCategory!.id,
           'category': _selectedCategory!.name,
+          'amount': amountVal,
+          'total_amount': amountVal,
         };
 
-        if (amountVal != null) payload['amount'] = amountVal;
         if (_selectedAccountId != null) payload['account_id'] = _selectedAccountId;
         if (noteVal.isNotEmpty) payload['notes'] = noteVal;
 
@@ -246,7 +257,7 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
 
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Template "$templateName" saved!')),
+            SnackBar(content: Text('Template "$templateName" saved successfully!')),
           );
         }
       } catch (e) {
@@ -255,10 +266,11 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
             SnackBar(content: Text('Failed to save template: $e')),
           );
         }
+      } finally {
+        if (mounted) setState(() => _isLoading = false);
       }
     }
   }
-  
   void _openItemizationScreen() async {
     if (_selectedCategory == null) {
       ScaffoldMessenger.of(context).showSnackBar(
