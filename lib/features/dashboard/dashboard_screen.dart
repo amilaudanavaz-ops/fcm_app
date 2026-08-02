@@ -68,171 +68,179 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
-  Future<void> _fetchDashboardMetrics() async {
-  setState(() => _isLoading = true);
-  final userId = Supabase.instance.client.auth.currentUser?.id;
-  if (userId == null) return;
+ Future<void> _fetchDashboardMetrics() async {
+    setState(() => _isLoading = true);
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    if (userId == null) return;
 
-  try {
-    // 1. Fetch Profile Currency
-    final profileData = await Supabase.instance.client
-        .from('profiles')
-        .select('currency_symbol')
-        .eq('id', userId)
-        .maybeSingle();
+    try {
+      // 1. Fetch Profile Currency (Safe Select)
+      final profileData = await Supabase.instance.client
+          .from('profiles')
+          .select() 
+          .eq('id', userId)
+          .maybeSingle();
 
-    final symbol = profileData?['currency_symbol'] as String? ?? '\$';
+      final symbol = profileData?['currency_symbol']?.toString() ?? '\$';
 
-    // 2. Fetch Accounts
-    final accountsData = await Supabase.instance.client
-        .from('accounts')
-        .select('id, type, current_balance, balance')
-        .eq('user_id', userId);
+      // 2. Fetch Accounts (SAFE SELECT: won't crash if a specific column is missing)
+      final accountsData = await Supabase.instance.client
+          .from('accounts')
+          .select() 
+          .eq('user_id', userId);
 
-    final Map<String, String> accountTypes = {
-      for (var item in accountsData)
-        item['id'].toString(): (item['type'] ?? 'wallet').toString()
-    };
+      final Map<String, String> accountTypes = {
+        for (var item in accountsData)
+          item['id'].toString(): (item['type'] ?? 'wallet').toString()
+      };
 
-    double walletDirect = 0.0;
-    double bankDirect = 0.0;
-    bool hasAccountBalances = false;
+      double walletDirect = 0.0;
+      double bankDirect = 0.0;
+      bool hasAccountBalances = false;
 
-    for (var acc in accountsData) {
-      final bal = ((acc['current_balance'] ?? acc['balance']) as num?)?.toDouble() ?? 0.0;
-      if (acc['current_balance'] != null || acc['balance'] != null) {
-        hasAccountBalances = true;
-      }
-      final type = (acc['type'] ?? 'wallet').toString();
-      if (type == 'wallet') {
-        walletDirect += bal;
-      } else {
-        bankDirect += bal;
-      }
-    }
-
-    // 3. Fetch Transactions
-    final txData = await Supabase.instance.client
-        .from('transactions')
-        .select('type, amount, date, account_id')
-        .eq('user_id', userId);
-
-    // 4. Fetch Expenses specifically for MTD
-    final expensesData = await Supabase.instance.client
-        .from('expenses')
-        .select('amount, date')
-        .eq('user_id', userId);
-
-    // 5. Fetch Transfers
-    final transferData = await Supabase.instance.client
-        .from('transfers')
-        .select('from_account_id, to_account_id, amount')
-        .eq('user_id', userId);
-
-    // 6. Fetch Commitments
-    final savedData = await Supabase.instance.client
-        .from('commitments')
-        .select('amount, transactions(account_id)')
-        .eq('user_id', userId)
-        .eq('status', 'deposited');
-
-    final pendingData = await Supabase.instance.client
-        .from('commitments')
-        .select('amount')
-        .eq('user_id', userId)
-        .eq('status', 'pending');
-
-    double incomeWallet = 0, expenseWallet = 0;
-    double incomeBank = 0, expenseBank = 0;
-    double mtdExpense = 0;
-    final now = DateTime.now();
-
-    // Calculate MTD Expenses directly from both 'expenses' and 'transactions' tables
-    final Set<String> processedKeys = {}; // Prevent double counting
-
-    for (var exp in expensesData) {
-      final amt = (exp['amount'] as num?)?.toDouble() ?? 0.0;
-      final dateStr = exp['date']?.toString();
-      if (dateStr != null) {
-        final date = DateTime.tryParse(dateStr) ?? now;
-        if (date.year == now.year && date.month == now.month) {
-          mtdExpense += amt;
+      for (var acc in accountsData) {
+        // Safely check for either current_balance or balance
+        final bal = ((acc['current_balance'] ?? acc['balance']) as num?)?.toDouble() ?? 0.0;
+        if (acc['current_balance'] != null || acc['balance'] != null) {
+          hasAccountBalances = true;
+        }
+        final type = (acc['type'] ?? 'wallet').toString();
+        if (type == 'wallet') {
+          walletDirect += bal;
+        } else {
+          bankDirect += bal;
         }
       }
-    }
 
-    // Process Transactions for cash balances
-    for (var tx in txData) {
-      final amt = (tx['amount'] as num?)?.toDouble() ?? 0.0;
-      final acctId = tx['account_id']?.toString() ?? '';
-      final acctType = accountTypes[acctId] ?? 'wallet';
-      final type = tx['type']?.toString();
+      // 3. Fetch Transactions (Safe Select)
+      final txData = await Supabase.instance.client
+          .from('transactions')
+          .select() 
+          .eq('user_id', userId);
 
-      if (type == 'income' || type == 'initial_balance') {
-        if (acctType == 'wallet') incomeWallet += amt;
-        if (acctType == 'bank') incomeBank += amt;
-      } else if (type == 'expense') {
-        if (acctType == 'wallet') expenseWallet += amt;
-        if (acctType == 'bank') expenseBank += amt;
-      }
-    }
+      // 4. Fetch Expenses specifically for MTD (Safe Select)
+      final expensesData = await Supabase.instance.client
+          .from('expenses')
+          .select() 
+          .eq('user_id', userId);
 
-    // Process Transfers
-    for (var tr in transferData) {
-      final amt = (tr['amount'] as num?)?.toDouble() ?? 0.0;
-      final fromId = tr['from_account_id']?.toString() ?? '';
-      final toId = tr['to_account_id']?.toString() ?? '';
-      final fromType = accountTypes[fromId];
-      final toType = accountTypes[toId];
+      // 5. Fetch Transfers (Safe Select)
+      final transferData = await Supabase.instance.client
+          .from('transfers')
+          .select() 
+          .eq('user_id', userId);
 
-      if (fromType == 'wallet') incomeWallet -= amt;
-      if (fromType == 'bank') incomeBank -= amt;
-      if (toType == 'wallet') incomeWallet += amt;
-      if (toType == 'bank') incomeBank += amt;
-    }
+      // 6. Fetch Commitments
+      final savedData = await Supabase.instance.client
+          .from('commitments')
+          .select('amount, transactions(account_id)')
+          .eq('user_id', userId)
+          .eq('status', 'deposited');
 
-    // Process Savings
-    double totalSaved = 0;
-    for (var s in savedData) {
-      final amt = (s['amount'] as num?)?.toDouble() ?? 0.0;
-      totalSaved += amt;
+      final pendingData = await Supabase.instance.client
+          .from('commitments')
+          .select()
+          .eq('user_id', userId)
+          .eq('status', 'pending');
 
-      final sourceTx = s['transactions'] as Map<String, dynamic>?;
-      if (sourceTx != null && sourceTx['account_id'] != null) {
-        final sourceAcctId = sourceTx['account_id'].toString();
-        final acctType = accountTypes[sourceAcctId];
+      double incomeWallet = 0, expenseWallet = 0;
+      double incomeBank = 0, expenseBank = 0;
+      double mtdExpense = 0;
+      final now = DateTime.now();
 
-        if (acctType == 'wallet') {
-          incomeWallet -= amt;
-        } else if (acctType == 'bank') {
-          incomeBank -= amt;
+      // Calculate MTD Expenses
+      for (var exp in expensesData) {
+        final amt = (exp['amount'] as num?)?.toDouble() ?? 0.0;
+        final dateStr = exp['date']?.toString();
+        if (dateStr != null) {
+          final date = DateTime.tryParse(dateStr) ?? now;
+          if (date.year == now.year && date.month == now.month) {
+            mtdExpense += amt;
+          }
         }
       }
-    }
 
-    double pending = 0;
-    for (var p in pendingData) {
-      pending += (p['amount'] as num?)?.toDouble() ?? 0.0;
-    }
+      // Process Transactions for cash balances
+      for (var tx in txData) {
+        final amt = (tx['amount'] as num?)?.toDouble() ?? 0.0;
+        final acctId = tx['account_id']?.toString() ?? '';
+        final acctType = accountTypes[acctId] ?? 'wallet';
+        final type = tx['type']?.toString();
 
-    if (mounted) {
-      setState(() {
-        _currencySymbol = symbol;
-        _walletBalance = hasAccountBalances ? walletDirect : (incomeWallet - expenseWallet);
-        _bankBalance = hasAccountBalances ? bankDirect : (incomeBank - expenseBank);
-        _netWorth = _walletBalance + _bankBalance + totalSaved;
-        _totalSaved = totalSaved;
-        _pendingTotal = pending;
-        _expenseMTD = mtdExpense;
-        _isLoading = false;
-      });
+        if (type == 'income' || type == 'initial_balance') {
+          if (acctType == 'wallet') incomeWallet += amt;
+          if (acctType == 'bank') incomeBank += amt;
+        } else if (type == 'expense') {
+          if (acctType == 'wallet') expenseWallet += amt;
+          if (acctType == 'bank') expenseBank += amt;
+        }
+      }
+
+      // Process Transfers
+      for (var tr in transferData) {
+        final amt = (tr['amount'] as num?)?.toDouble() ?? 0.0;
+        final fromId = tr['from_account_id']?.toString() ?? '';
+        final toId = tr['to_account_id']?.toString() ?? '';
+        final fromType = accountTypes[fromId];
+        final toType = accountTypes[toId];
+
+        if (fromType == 'wallet') incomeWallet -= amt;
+        if (fromType == 'bank') incomeBank -= amt;
+        if (toType == 'wallet') incomeWallet += amt;
+        if (toType == 'bank') incomeBank += amt;
+      }
+
+      // Process Savings
+      double totalSaved = 0;
+      for (var s in savedData) {
+        final amt = (s['amount'] as num?)?.toDouble() ?? 0.0;
+        totalSaved += amt;
+
+        final sourceTx = s['transactions'] as Map<String, dynamic>?;
+        if (sourceTx != null && sourceTx['account_id'] != null) {
+          final sourceAcctId = sourceTx['account_id'].toString();
+          final acctType = accountTypes[sourceAcctId];
+
+          if (acctType == 'wallet') {
+            incomeWallet -= amt;
+          } else if (acctType == 'bank') {
+            incomeBank -= amt;
+          }
+        }
+      }
+
+      double pending = 0;
+      for (var p in pendingData) {
+        pending += (p['amount'] as num?)?.toDouble() ?? 0.0;
+      }
+
+      if (mounted) {
+        setState(() {
+          _currencySymbol = symbol;
+          _walletBalance = hasAccountBalances ? walletDirect : (incomeWallet - expenseWallet);
+          _bankBalance = hasAccountBalances ? bankDirect : (incomeBank - expenseBank);
+          _netWorth = _walletBalance + _bankBalance + totalSaved;
+          _totalSaved = totalSaved;
+          _pendingTotal = pending;
+          _expenseMTD = mtdExpense;
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isLoading = false);
+        // This will pop up a red message at the bottom of your screen if any Supabase query fails!
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Dashboard Sync Error: $e'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+      debugPrint('Error fetching dashboard metrics: $e');
     }
-  } catch (e) {
-    if (mounted) setState(() => _isLoading = false);
-    debugPrint('Error fetching dashboard metrics: $e');
   }
-}
-
+  
   Future<void> _signOut() async {
     await Supabase.instance.client.auth.signOut();
     if (mounted) {
