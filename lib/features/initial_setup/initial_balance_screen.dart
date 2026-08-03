@@ -44,23 +44,22 @@ class _InitialBalanceScreenState extends State<InitialBalanceScreen> {
     final amount = double.parse(_amountController.text);
 
     try {
-      // 1. Ensure 'My Wallet' exists and get its ID
       var accounts = await Supabase.instance.client.from('accounts').select().eq('user_id', userId).eq('name', 'My Wallet');
-      int walletId;
+      dynamic walletId;
 
       if (accounts.isEmpty) {
-        // Create the default wallet if it doesn't exist
         final newAccount = await Supabase.instance.client.from('accounts').insert({
           'user_id': userId, 
           'name': 'My Wallet', 
-          'type': 'wallet'
+          'type': 'wallet',
+          'current_balance': amount // Sync for safety
         }).select().single();
         walletId = newAccount['id'];
       } else {
         walletId = accounts.first['id'];
+        await Supabase.instance.client.from('accounts').update({'current_balance': amount}).eq('id', walletId);
       }
 
-      // 2. Insert the initial balance as a special transaction
       await Supabase.instance.client.from('transactions').insert({
         'user_id': userId,
         'type': 'initial_balance', 
@@ -83,7 +82,6 @@ class _InitialBalanceScreenState extends State<InitialBalanceScreen> {
       if (mounted) setState(() => _isLoading = false);
     }
   }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(

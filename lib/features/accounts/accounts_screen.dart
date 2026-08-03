@@ -12,34 +12,99 @@ class AccountsScreen extends StatefulWidget {
 class _AccountsScreenState extends State<AccountsScreen> {
   final SupabaseClient _supabase = Supabase.instance.client;
   List<Map<String, dynamic>> _accounts = [];
+  Map<String, double> _liveBalances = {};
   bool _isLoading = true;
 
   @override
   void initState() {
     super.initState();
-    _fetchAccounts();
+    _fetchAccountsAndLiveBalances();
   }
 
-  Future<void> _fetchAccounts() async {
+  Future<void> _fetchAccountsAndLiveBalances() async {
     setState(() => _isLoading = true);
     try {
       final userId = _supabase.auth.currentUser?.id;
       if (userId == null) return;
 
-      final response = await _supabase
+      // 1. Fetch Accounts
+      final accResponse = await _supabase
           .from('accounts')
           .select()
           .eq('user_id', userId);
+      final fetchedAccounts = List<Map<String, dynamic>>.from(accResponse);
+
+      // 2. Fetch Transactions (Income, Expense, Initial Balance)
+      final txResponse = await _supabase
+          .from('transactions')
+          .select('type, amount, account_id')
+          .eq('user_id', userId);
+
+      // 3. Fetch Transfers
+      final transferResponse = await _supabase
+          .from('transfers')
+          .select('from_account_id, to_account_id, amount')
+          .eq('user_id', userId);
+
+      // 4. Fetch Commitments
+      final commitmentsResponse = await _supabase
+          .from('commitments')
+          .select('amount, transactions(account_id)')
+          .eq('user_id', userId)
+          .eq('status', 'deposited');
+
+      Map<String, double> balances = {};
+
+      // Initialize all accounts to 0
+      for (var acc in fetchedAccounts) {
+        balances[acc['id'].toString()] = 0.0;
+      }
+
+      // Add/Subtract Transactions
+      for (var tx in txResponse) {
+        final acctId = tx['account_id']?.toString();
+        if (acctId == null) continue;
+        
+        final amt = (tx['amount'] as num?)?.toDouble() ?? 0.0;
+        final type = tx['type']?.toString();
+
+        if (type == 'income' || type == 'initial_balance') {
+          balances[acctId] = (balances[acctId] ?? 0.0) + amt;
+        } else if (type == 'expense') {
+          balances[acctId] = (balances[acctId] ?? 0.0) - amt;
+        }
+      }
+
+      // Add/Subtract Transfers
+      for (var tr in transferResponse) {
+        final amt = (tr['amount'] as num?)?.toDouble() ?? 0.0;
+        final fromId = tr['from_account_id']?.toString();
+        final toId = tr['to_account_id']?.toString();
+
+        if (fromId != null) balances[fromId] = (balances[fromId] ?? 0.0) - amt;
+        if (toId != null) balances[toId] = (balances[toId] ?? 0.0) + amt;
+      }
+
+      // Subtract deposited commitments from source accounts
+      for (var c in commitmentsResponse) {
+        final amt = (c['amount'] as num?)?.toDouble() ?? 0.0;
+        final sourceTx = c['transactions'] as Map<String, dynamic>?;
+        if (sourceTx != null && sourceTx['account_id'] != null) {
+          final acctId = sourceTx['account_id'].toString();
+          balances[acctId] = (balances[acctId] ?? 0.0) - amt;
+        }
+      }
 
       if (mounted) {
         setState(() {
-          _accounts = List<Map<String, dynamic>>.from(response);
+          _accounts = fetchedAccounts;
+          _liveBalances = balances;
           _isLoading = false;
         });
       }
     } catch (e) {
       if (mounted) setState(() => _isLoading = false);
-      debugPrint('Error fetching accounts: $e');
+      debugPrint('Error fetching account management balances: $e');
     }
   }
 
@@ -91,15 +156,27 @@ class _AccountsScreenState extends State<AccountsScreen> {
 
                 final userId = _supabase.auth.currentUser?.id;
                 if (userId != null) {
-                  await _supabase.from('accounts').insert({
+                  final newAcc = await _supabase.from('accounts').insert({
                     'user_id': userId,
                     'name': name,
                     'type': selectedType,
                     'current_balance': initialBal,
-                  });
+                  }).select().single();
+
+                  if (initialBal > 0) {
+                    await _supabase.from('transactions').insert({
+                      'user_id': userId,
+                      'account_id': newAcc['id'],
+                      'type': 'initial_balance',
+                      'amount': initialBal,
+                      'title': 'Initial Balance',
+                      'date': DateTime.now().toIso8601String(),
+                    });
+                  }
+
                   if (mounted) {
                     Navigator.pop(ctx);
-                    _fetchAccounts();
+                    _fetchAccountsAndLiveBalances();
                   }
                 }
               },
@@ -129,40 +206,45 @@ class _AccountsScreenState extends State<AccountsScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Transfer Banner
                   Card(
                     elevation: 1,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                     child: Padding(
                       padding: const EdgeInsets.all(16.0),
-                      child: Row(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text('Internal Transfer', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                                SizedBox(height: 4),
-                                Text('Move money between wallet & banks', style: TextStyle(color: Colors.grey, fontSize: 12)),
-                              ],
-                            ),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text(
+                                'Internal Transfer',
+                                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                              ),
+                              ElevatedButton.icon(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.deepPurple,
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                ),
+                                onPressed: () async {
+                                  await Navigator.push(
+                                    context,
+                                    MaterialPageRoute(builder: (_) => const TransferScreen()),
+                                  );
+                                  _fetchAccountsAndLiveBalances();
+                                },
+                                icon: const Icon(Icons.swap_horiz, size: 16),
+                                label: const Text('Transfer Now', style: TextStyle(fontSize: 12)),
+                              ),
+                            ],
                           ),
-                          ElevatedButton.icon(
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.deepPurple,
-                              foregroundColor: Colors.white,
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                            ),
-                            onPressed: () async {
-                              await Navigator.push(
-                                context,
-                                MaterialPageRoute(builder: (_) => const TransferScreen()),
-                              );
-                              _fetchAccounts();
-                            },
-                            icon: const Icon(Icons.swap_horiz, size: 18),
-                            label: const Text('Transfer Now'),
-                          )
+                          const SizedBox(height: 6),
+                          const Text(
+                            'Move money between wallet & bank accounts',
+                            style: TextStyle(color: Colors.grey, fontSize: 12),
+                          ),
                         ],
                       ),
                     ),
@@ -170,7 +252,6 @@ class _AccountsScreenState extends State<AccountsScreen> {
 
                   const SizedBox(height: 20),
 
-                  // Accounts List
                   if (_accounts.isEmpty)
                     const Padding(
                       padding: EdgeInsets.symmetric(vertical: 40),
@@ -183,8 +264,9 @@ class _AccountsScreenState extends State<AccountsScreen> {
                       itemCount: _accounts.length,
                       itemBuilder: (context, index) {
                         final acc = _accounts[index];
+                        final idStr = acc['id'].toString();
                         final isBank = acc['type'] == 'bank';
-                        final double balance = ((acc['current_balance'] ?? acc['balance']) as num?)?.toDouble() ?? 0.0;
+                        final double balance = _liveBalances[idStr] ?? 0.0;
 
                         return Card(
                           margin: const EdgeInsets.only(bottom: 12),
@@ -207,20 +289,13 @@ class _AccountsScreenState extends State<AccountsScreen> {
                               isBank ? 'Bank Account' : 'Cash on hand',
                               style: const TextStyle(color: Colors.grey, fontSize: 12),
                             ),
-                            trailing: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              crossAxisAlignment: CrossAxisAlignment.end,
-                              children: [
-                                Text(
-                                  '\$${balance.toStringAsFixed(2)}',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 16,
-                                    color: balance < 0 ? Colors.red : Colors.grey.shade900,
-                                  ),
-                                ),
-                                const Icon(Icons.chevron_right, size: 18, color: Colors.grey),
-                              ],
+                            trailing: Text(
+                              '\$${balance.toStringAsFixed(2)}',
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16,
+                                color: balance < 0 ? Colors.red : Colors.grey.shade900,
+                              ),
                             ),
                           ),
                         );
