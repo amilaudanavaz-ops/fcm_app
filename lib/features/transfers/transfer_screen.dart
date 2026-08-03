@@ -44,7 +44,7 @@ class _TransferScreenState extends State<TransferScreen> {
       // 1. Fetch Currency Symbol
       final profileData = await _supabase
           .from('profiles')
-          .select('currency_symbol')
+          .select() // Safe select
           .eq('id', userId)
           .maybeSingle();
 
@@ -55,7 +55,7 @@ class _TransferScreenState extends State<TransferScreen> {
       // 2. Fetch Accounts
       final data = await _supabase
           .from('accounts')
-          .select()
+          .select() // Safe select
           .eq('user_id', userId)
           .order('id', ascending: true);
 
@@ -63,7 +63,6 @@ class _TransferScreenState extends State<TransferScreen> {
         setState(() {
           _accounts = List<Map<String, dynamic>>.from(data);
           if (_accounts.length >= 2) {
-            // Smart defaults: First account is From, Second is To
             _fromAccountId = _accounts[0]['id'];
             _toAccountId = _accounts[1]['id'];
           } else if (_accounts.isNotEmpty) {
@@ -116,22 +115,22 @@ class _TransferScreenState extends State<TransferScreen> {
     }
 
     try {
-      // 1. STRICT BALANCE CHECK
+      // 1. STRICT BALANCE CHECK using SAFE select()
       final fromAccFresh = await _supabase
           .from('accounts')
-          .select('name, current_balance, balance')
+          .select() // Safe select - grabs whatever columns exist
           .eq('id', _fromAccountId)
           .single();
 
       final toAccFresh = await _supabase
           .from('accounts')
-          .select('current_balance, balance')
+          .select() // Safe select
           .eq('id', _toAccountId)
           .single();
 
       final double fromBal = ((fromAccFresh['current_balance'] ?? fromAccFresh['balance']) as num?)?.toDouble() ?? 0.0;
       final double toBal = ((toAccFresh['current_balance'] ?? toAccFresh['balance']) as num?)?.toDouble() ?? 0.0;
-      final String fromAccName = fromAccFresh['name'] ?? 'Selected Account';
+      final String fromAccName = fromAccFresh['name']?.toString() ?? 'Selected Account';
 
       if (fromBal < amount) {
         setState(() => _isSubmitting = false);
@@ -262,7 +261,6 @@ class _TransferScreenState extends State<TransferScreen> {
                                 border: InputBorder.none,
                               ),
                               items: _accounts.map((acc) {
-                                final isBank = acc['type'] == 'bank';
                                 final double bal = ((acc['current_balance'] ?? acc['balance']) as num?)?.toDouble() ?? 0.0;
                                 return DropdownMenuItem<dynamic>(
                                   value: acc['id'],
@@ -301,7 +299,6 @@ class _TransferScreenState extends State<TransferScreen> {
                                 border: InputBorder.none,
                               ),
                               items: _accounts.map((acc) {
-                                final isBank = acc['type'] == 'bank';
                                 final double bal = ((acc['current_balance'] ?? acc['balance']) as num?)?.toDouble() ?? 0.0;
                                 return DropdownMenuItem<dynamic>(
                                   value: acc['id'],
