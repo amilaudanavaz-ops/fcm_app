@@ -74,19 +74,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
     if (userId == null) return;
 
     try {
-      // 1. Fetch Profile Currency (Safe Select)
+      // 1. Fetch Profile Currency Symbol
       final profileData = await Supabase.instance.client
           .from('profiles')
-          .select() 
+          .select()
           .eq('id', userId)
           .maybeSingle();
 
       final symbol = profileData?['currency_symbol']?.toString() ?? '\$';
 
-      // 2. Fetch Accounts (SAFE SELECT: won't crash if a specific column is missing)
+      // 2. Fetch Accounts
       final accountsData = await Supabase.instance.client
           .from('accounts')
-          .select() 
+          .select()
           .eq('user_id', userId);
 
       final Map<String, String> accountTypes = {
@@ -96,13 +96,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
       double walletDirect = 0.0;
       double bankDirect = 0.0;
-      bool hasAccountBalances = false;
+      bool hasNonZeroAccountBalances = false;
 
       for (var acc in accountsData) {
-        // Safely check for either current_balance or balance
         final bal = ((acc['current_balance'] ?? acc['balance']) as num?)?.toDouble() ?? 0.0;
-        if (acc['current_balance'] != null || acc['balance'] != null) {
-          hasAccountBalances = true;
+        if (bal != 0.0) {
+          hasNonZeroAccountBalances = true;
         }
         final type = (acc['type'] ?? 'wallet').toString();
         if (type == 'wallet') {
@@ -112,25 +111,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }
       }
 
-      // 3. Fetch Transactions (Safe Select)
+      // 3. Fetch Transactions
       final txData = await Supabase.instance.client
           .from('transactions')
-          .select() 
+          .select()
           .eq('user_id', userId);
 
-      // 4. Fetch Expenses specifically for MTD (Safe Select)
+      // 4. Fetch Expenses specifically for MTD
       final expensesData = await Supabase.instance.client
           .from('expenses')
-          .select() 
+          .select()
           .eq('user_id', userId);
 
-      // 5. Fetch Transfers (Safe Select)
+      // 5. Fetch Transfers
       final transferData = await Supabase.instance.client
           .from('transfers')
-          .select() 
+          .select()
           .eq('user_id', userId);
 
-      // 6. Fetch Commitments
+      // 6. Fetch Savings / Commitments
       final savedData = await Supabase.instance.client
           .from('commitments')
           .select('amount, transactions(account_id)')
@@ -148,7 +147,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       double mtdExpense = 0;
       final now = DateTime.now();
 
-      // Calculate MTD Expenses
+      // Calculate Month-To-Date (MTD) Expenses directly from 'expenses'
       for (var exp in expensesData) {
         final amt = (exp['amount'] as num?)?.toDouble() ?? 0.0;
         final dateStr = exp['date']?.toString();
@@ -160,7 +159,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }
       }
 
-      // Process Transactions for cash balances
+      // Process Transactions for Cash Balances (Wallet vs Bank)
       for (var tx in txData) {
         final amt = (tx['amount'] as num?)?.toDouble() ?? 0.0;
         final acctId = tx['account_id']?.toString() ?? '';
@@ -214,11 +213,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
         pending += (p['amount'] as num?)?.toDouble() ?? 0.0;
       }
 
+      final calculatedWallet = incomeWallet - expenseWallet;
+      final calculatedBank = incomeBank - expenseBank;
+
       if (mounted) {
         setState(() {
           _currencySymbol = symbol;
-          _walletBalance = hasAccountBalances ? walletDirect : (incomeWallet - expenseWallet);
-          _bankBalance = hasAccountBalances ? bankDirect : (incomeBank - expenseBank);
+          // Fall back to transaction aggregation if account balances are zero
+          _walletBalance = hasNonZeroAccountBalances && walletDirect != 0 ? walletDirect : calculatedWallet;
+          _bankBalance = hasNonZeroAccountBalances && bankDirect != 0 ? bankDirect : calculatedBank;
           _netWorth = _walletBalance + _bankBalance + totalSaved;
           _totalSaved = totalSaved;
           _pendingTotal = pending;
@@ -229,7 +232,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
     } catch (e) {
       if (mounted) {
         setState(() => _isLoading = false);
-        // This will pop up a red message at the bottom of your screen if any Supabase query fails!
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Dashboard Sync Error: $e'),
@@ -239,8 +241,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }
       debugPrint('Error fetching dashboard metrics: $e');
     }
-  }
-  
+  }  
   Future<void> _signOut() async {
     await Supabase.instance.client.auth.signOut();
     if (mounted) {
