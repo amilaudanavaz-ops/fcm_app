@@ -188,6 +188,7 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
     );
   }
 
+  // --- SAVE AS TEMPLATE ---
   Future<void> _saveAsTemplate() async {
     if (_selectedCategory == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -200,7 +201,7 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
 
     final templateName = await showDialog<String>(
       context: context,
-      barrierDismissible: false, // Prevents accidental freeze
+      barrierDismissible: false,
       builder: (ctx) => AlertDialog(
         title: const Text('Save as Template'),
         content: TextField(
@@ -208,22 +209,21 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
           autofocus: true,
           decoration: const InputDecoration(
             labelText: 'Template Name',
-            hintText: 'e.g., Travel Template',
+            hintText: 'e.g., Weekly Groceries',
           ),
         ),
         actions: [
           TextButton(
             onPressed: () {
-              FocusScope.of(ctx).unfocus(); // Dismiss keyboard
+              FocusScope.of(ctx).unfocus();
               Navigator.pop(ctx);
             },
             child: const Text('Cancel'),
           ),
           ElevatedButton(
             onPressed: () {
-              FocusScope.of(ctx).unfocus(); // Dismiss keyboard FIRST
-              final text = templateNameController.text.trim();
-              Navigator.pop(ctx, text);
+              FocusScope.of(ctx).unfocus();
+              Navigator.pop(ctx, templateNameController.text.trim());
             },
             child: const Text('Save'),
           ),
@@ -233,7 +233,6 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
 
     if (templateName != null && templateName.isNotEmpty) {
       setState(() => _isLoading = true);
-
       try {
         final userId = _supabase.auth.currentUser?.id;
         if (userId == null) throw 'User not authenticated';
@@ -271,6 +270,7 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
       }
     }
   }
+
   void _openItemizationScreen() async {
     if (_selectedCategory == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -279,13 +279,15 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
       return;
     }
 
-    // Capture the Map returned by ItemizationScreen
+    final String currentNotes = _noteController.text;
+
     final result = await Navigator.push(
       context,
       MaterialPageRoute(
         builder: (context) => ItemizationScreen(
           categoryId: _selectedCategory!.id,
           categoryName: _selectedCategory!.name,
+          existingBreakdown: currentNotes,
         ),
       ),
     );
@@ -296,18 +298,19 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
 
       if (calculatedTotal > 0) {
         setState(() {
-          // 1. Update the total amount
           _amountController.text = calculatedTotal.toStringAsFixed(2);
           
-          // 2. Append the breakdown to the notes field
+          String noteText = _noteController.text;
+          if (noteText.contains('Itemized Breakdown:')) {
+            noteText = noteText.split('Itemized Breakdown:')[0].trim();
+          }
+
           if (breakdownText.isNotEmpty) {
-            final currentNote = _noteController.text.trim();
-            
-            if (!currentNote.contains(breakdownText)) {
-              _noteController.text = currentNote.isEmpty 
-                  ? "Itemized Breakdown:\n$breakdownText" 
-                  : "$currentNote\n\nItemized Breakdown:\n$breakdownText";
-            }
+            _noteController.text = noteText.isEmpty 
+                ? "Itemized Breakdown:\n$breakdownText" 
+                : "$noteText\n\nItemized Breakdown:\n$breakdownText";
+          } else {
+            _noteController.text = noteText;
           }
         });
       }
@@ -333,7 +336,47 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
       final noteText = _noteController.text.trim();
       final isoDate = _selectedDate.toIso8601String();
 
-      // 1. Insert into 'expenses' table
+      // 1. Balance Check: Ensure selected account has sufficient funds
+      if (_selectedAccountId != null) {
+        final accountData = await _supabase
+            .from('accounts')
+            .select() // FIXED: Removed strict columns causing the crash
+            .eq('id', _selectedAccountId!)
+            .single();
+
+        final double currentBal = ((accountData['current_balance'] ?? accountData['balance']) as num?)?.toDouble() ?? 0.0;
+        final String accountName = accountData['name'] ?? 'Selected Account';
+
+        if (currentBal < amount) {
+          setState(() => _isLoading = false);
+          if (mounted) {
+            showDialog(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                title: const Row(
+                  children: [
+                    Icon(Icons.warning_amber_rounded, color: Colors.redAccent),
+                    SizedBox(width: 8),
+                    Text('Insufficient Funds'),
+                  ],
+                ),
+                content: Text(
+                  'Cannot record expense of \$${amount.toStringAsFixed(2)}.\n\n"$accountName" currently only has a balance of \$${currentBal.toStringAsFixed(2)}.',
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: const Text('OK'),
+                  ),
+                ],
+              ),
+            );
+          }
+          return; 
+        }
+      }
+
+      // 2. Insert into 'expenses' table
       await _supabase.from('expenses').insert({
         'user_id': userId,
         'amount': amount,
@@ -347,7 +390,7 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
         'date': isoDate,
       });
 
-      // 2. Insert into 'transactions' table (Required for Dashboard, History, & Graphs)
+      // 3. Insert into 'transactions' table
       await _supabase.from('transactions').insert({
         'user_id': userId,
         'amount': amount,
@@ -360,30 +403,20 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
         'date': isoDate,
       });
 
-      // 3. Update target account balance
+      // 4. Deduct amount from target account (Fallback safety update)
       if (_selectedAccountId != null) {
-        try {
-          final accountData = await _supabase
-              .from('accounts')
-              .select('id, current_balance, balance')
-              .eq('id', _selectedAccountId!)
-              .single();
+        final accountData = await _supabase
+            .from('accounts')
+            .select() // FIXED: Removed strict columns causing the crash
+            .eq('id', _selectedAccountId!)
+            .single();
 
-          if (accountData['current_balance'] != null) {
-            final currentBal = (accountData['current_balance'] as num).toDouble();
-            await _supabase
-                .from('accounts')
-                .update({'current_balance': currentBal - amount})
-                .eq('id', _selectedAccountId!);
-          } else if (accountData['balance'] != null) {
-            final currentBal = (accountData['balance'] as num).toDouble();
-            await _supabase
-                .from('accounts')
-                .update({'balance': currentBal - amount})
-                .eq('id', _selectedAccountId!);
-          }
-        } catch (accError) {
-          debugPrint('Account balance update skipped: $accError');
+        if (accountData['current_balance'] != null) {
+          final currentBal = (accountData['current_balance'] as num).toDouble();
+          await _supabase
+              .from('accounts')
+              .update({'current_balance': currentBal - amount})
+              .eq('id', _selectedAccountId!);
         }
       }
 
@@ -431,7 +464,6 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Amount Field & Itemize Action
                     TextFormField(
                       controller: _amountController,
                       keyboardType: const TextInputType.numberWithOptions(decimal: true),
@@ -447,18 +479,13 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
                         ),
                       ),
                       validator: (value) {
-                        if (value == null || value.isEmpty) {
-                          return 'Please enter an amount';
-                        }
-                        if (double.tryParse(value) == null) {
-                          return 'Enter a valid number';
-                        }
+                        if (value == null || value.isEmpty) return 'Please enter an amount';
+                        if (double.tryParse(value) == null) return 'Enter a valid number';
                         return null;
                       },
                     ),
                     const SizedBox(height: 20),
 
-                    // Category Dropdown
                     DropdownButtonFormField<CategoryModel>(
                       value: _selectedCategory,
                       decoration: const InputDecoration(
@@ -479,7 +506,6 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
                     ),
                     const SizedBox(height: 20),
 
-                    // Account Dropdown
                     if (_accounts.isNotEmpty) ...[
                       DropdownButtonFormField<String>(
                         value: _selectedAccountId,
@@ -501,7 +527,6 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
                       const SizedBox(height: 20),
                     ],
 
-                    // Note Field
                     TextFormField(
                       controller: _noteController,
                       minLines: 1,
@@ -514,7 +539,6 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
                     ),
                     const SizedBox(height: 20),
 
-                    // Date Picker Tile
                     ListTile(
                       shape: RoundedRectangleBorder(
                         side: const BorderSide(color: Colors.grey),
@@ -539,7 +563,6 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
                     ),
                     const SizedBox(height: 30),
 
-                    // Save Button
                     SizedBox(
                       width: double.infinity,
                       height: 50,
