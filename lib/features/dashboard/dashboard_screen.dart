@@ -1,16 +1,13 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../../core/services/theme_provider.dart'; 
-import '../auth/login_screen.dart';
-import '../settings/settings_screen.dart';
-import '../income/income_entry_screen.dart';
+import '../accounts/accounts_screen.dart';
 import '../expenses/expense_entry_screen.dart';
-import '../savings/commitment_hub_screen.dart';
+import '../income/income_entry_screen.dart';
 import '../reports/reports_screen.dart';
-import '../accounts/accounts_screen.dart'; 
-import '../initial_setup/initial_balance_screen.dart'; 
+import '../savings/commitment_hub_screen.dart';
+import '../settings/settings_screen.dart';
+import '../auth/login_screen.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -20,22 +17,22 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
+  final PageController _pageController = PageController();
+  int _currentPage = 0;
+  bool _isLoading = true;
+
+  String _currencySymbol = '\$';
   double _netWorth = 0.0;
   double _walletBalance = 0.0;
   double _bankBalance = 0.0;
   double _totalSaved = 0.0;
   double _expenseMTD = 0.0;
-  double _pendingTotal = 0.0; 
-  bool _isLoading = true;
-  String _currencySymbol = '\$';
-
-  final PageController _pageController = PageController(viewportFraction: 0.9);
-  int _currentPage = 0;
+  double _pendingTotal = 0.0;
 
   @override
   void initState() {
     super.initState();
-    _checkInitialSetup();
+    _fetchDashboardMetrics();
   }
 
   @override
@@ -44,37 +41,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
     super.dispose();
   }
 
-  Future<void> _checkInitialSetup() async {
-    final userId = Supabase.instance.client.auth.currentUser?.id;
-    if (userId == null) return;
-
-    try {
-      final response = await Supabase.instance.client
-          .from('transactions')
-          .select('id')
-          .eq('user_id', userId)
-          .count(CountOption.exact); 
-
-      if (response.count == 0 && mounted) {
-        Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const InitialBalanceScreen()),
-        );
-      } else {
-        _fetchDashboardMetrics();
-      }
-    } catch (e) {
-      debugPrint('Error checking initial setup: $e');
-      _fetchDashboardMetrics(); 
-    }
-  }
-
- Future<void> _fetchDashboardMetrics() async {
+  Future<void> _fetchDashboardMetrics() async {
     setState(() => _isLoading = true);
     final userId = Supabase.instance.client.auth.currentUser?.id;
     if (userId == null) return;
 
     try {
-      // 1. Fetch Profile Currency Symbol
+      // 1. Fetch Profile Currency Symbol (Safe Select)
       final profileData = await Supabase.instance.client
           .from('profiles')
           .select()
@@ -83,7 +56,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
       final symbol = profileData?['currency_symbol']?.toString() ?? '\$';
 
-      // 2. Fetch Accounts
+      // 2. Fetch Accounts (Safe Select)
       final accountsData = await Supabase.instance.client
           .from('accounts')
           .select()
@@ -111,19 +84,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }
       }
 
-      // 3. Fetch Transactions
+      // 3. Fetch Transactions (Safe Select)
       final txData = await Supabase.instance.client
           .from('transactions')
           .select()
           .eq('user_id', userId);
 
-      // 4. Fetch Expenses specifically for MTD
+      // 4. Fetch Expenses specifically for MTD (Safe Select)
       final expensesData = await Supabase.instance.client
           .from('expenses')
           .select()
           .eq('user_id', userId);
 
-      // 5. Fetch Transfers
+      // 5. Fetch Transfers (Safe Select)
       final transferData = await Supabase.instance.client
           .from('transfers')
           .select()
@@ -219,7 +192,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (mounted) {
         setState(() {
           _currencySymbol = symbol;
-          // Fall back to transaction aggregation if account balances are zero
           _walletBalance = hasNonZeroAccountBalances && walletDirect != 0 ? walletDirect : calculatedWallet;
           _bankBalance = hasNonZeroAccountBalances && bankDirect != 0 ? bankDirect : calculatedBank;
           _netWorth = _walletBalance + _bankBalance + totalSaved;
@@ -241,8 +213,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }
       debugPrint('Error fetching dashboard metrics: $e');
     }
-  }  
-  Future<void> _signOut() async {
+  }
+
+  Future<void> _logout() async {
     await Supabase.instance.client.auth.signOut();
     if (mounted) {
       Navigator.of(context).pushReplacement(
@@ -251,141 +224,60 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
-  void _openSettings() {
-    Navigator.of(context)
-        .push(MaterialPageRoute(builder: (_) => const SettingsScreen()))
-        .then((_) => _fetchDashboardMetrics());
-  }
-
-  Widget _buildBalanceCard(BuildContext context, {
-    required String title, 
-    required double amount, 
-    required Color color,
-    required IconData icon,
-    VoidCallback? onTap
-  }) {
-    final uiStyle = Provider.of<ThemeProvider>(context).uiStyle;
-    
-    if (uiStyle == 'glass') {
-      return _buildGlassCard(title, amount, color, icon, onTap);
-    } else {
-      return _buildSoftCard(title, amount, color, icon, onTap);
-    }
-  }
-
-  Widget _buildGlassCard(String title, double amount, Color glowColor, IconData icon, VoidCallback? onTap) {
-    return GestureDetector(
-      onTap: onTap,
+  Widget _buildTopCard(String title, double amount, IconData icon, Color color) {
+    return InkWell(
+      onTap: () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const AccountsScreen()),
+        ).then((_) => _fetchDashboardMetrics());
+      },
       child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 5),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(24),
-          border: Border.all(color: Colors.white.withValues(alpha: 0.15), width: 1),
-          color: glowColor.withValues(alpha: 0.05),
-          gradient: RadialGradient(
-            center: Alignment.center,
-            radius: 1.4,
-            colors: [
-              Colors.transparent,               
-              glowColor.withValues(alpha: 0.0), 
-              glowColor.withValues(alpha: 0.3), 
-            ],
-            stops: const [0.0, 0.6, 1.0], 
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.05),
-              blurRadius: 20,
-              offset: const Offset(0, 10),
-            )
-          ],
-        ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 20.0, horizontal: 24.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon, color: Colors.white, size: 30),
-              const SizedBox(height: 8),
-              Text(
-                title, 
-                style: const TextStyle(
-                  color: Colors.white70, 
-                  fontSize: 13, 
-                  letterSpacing: 1.1, 
-                  fontWeight: FontWeight.w500
-                ),
-              ),
-              const SizedBox(height: 4),
-              _isLoading
-                  ? const SizedBox(
-                      height: 20, 
-                      width: 20, 
-                      child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)
-                    )
-                  : Text(
-                      '$_currencySymbol${amount.toStringAsFixed(2)}', 
-                      style: const TextStyle(color: Colors.white, fontSize: 32, fontWeight: FontWeight.bold)
-                    ),
-              if (onTap != null) ...[
-                const SizedBox(height: 12),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.1), 
-                    borderRadius: BorderRadius.circular(20)
-                  ),
-                  child: const Text('Manage', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
-                )
-              ]
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSoftCard(String title, double amount, Color color, IconData icon, VoidCallback? onTap) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 5),
+        margin: const EdgeInsets.symmetric(horizontal: 16),
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(24),
-          boxShadow: [
-            BoxShadow(color: color.withValues(alpha: 0.15), blurRadius: 15, offset: const Offset(0, 8))
+          boxShadow: const [
+            BoxShadow(color: Colors.black12, blurRadius: 10, offset: Offset(0, 4))
           ],
-          border: Border.all(color: color.withValues(alpha: 0.1), width: 1),
         ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 20.0, horizontal: 24.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(color: color.withValues(alpha: 0.1), shape: BoxShape.circle),
-                child: Icon(icon, color: color, size: 24),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircleAvatar(
+              backgroundColor: color.withValues(alpha: 0.15),
+              radius: 24,
+              child: Icon(icon, color: color, size: 28),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              title.toUpperCase(),
+              style: const TextStyle(
+                color: Colors.grey,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 1.2,
+                fontSize: 12,
               ),
-              const SizedBox(height: 10),
-              Text(
-                title, 
-                style: TextStyle(color: Colors.grey.shade600, fontSize: 13, letterSpacing: 1.1, fontWeight: FontWeight.w600)
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '$_currencySymbol${amount.toStringAsFixed(2)}',
+              style: const TextStyle(
+                fontSize: 32,
+                fontWeight: FontWeight.bold,
+                color: Colors.black87,
               ),
-              const SizedBox(height: 4),
-              _isLoading
-                  ? CircularProgressIndicator(color: color)
-                  : Text(
-                      '$_currencySymbol${amount.toStringAsFixed(2)}', 
-                      style: TextStyle(color: Colors.grey.shade900, fontSize: 32, fontWeight: FontWeight.bold)
-                    ),
-              if (onTap != null) ...[
-                const SizedBox(height: 12),
-                Text('Tap to manage', style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.bold)),
-              ]
-            ],
-          ),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'Tap to manage',
+              style: TextStyle(
+                color: Colors.deepPurpleAccent,
+                fontWeight: FontWeight.bold,
+                fontSize: 13,
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -393,302 +285,223 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final themeProvider = Provider.of<ThemeProvider>(context);
-    final colorScheme = Theme.of(context).colorScheme;
-    final isGlass = themeProvider.uiStyle == 'glass';
-
     return Scaffold(
-      extendBodyBehindAppBar: true, 
+      backgroundColor: Colors.grey[50],
       appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        title: const Text('Dashboard'),
-        centerTitle: true,
+        backgroundColor: Colors.deepPurple,
         elevation: 0,
+        title: const Text('Dashboard', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        centerTitle: true,
+        iconTheme: const IconThemeData(color: Colors.white),
         actions: [
-          IconButton(icon: const Icon(Icons.settings), onPressed: _openSettings),
-          IconButton(icon: const Icon(Icons.logout), onPressed: _signOut),
-        ],
-      ),
-      
-      floatingActionButton: Row(
-        mainAxisAlignment: MainAxisAlignment.end,
-        children: [
-          FloatingActionButton.extended(
-            heroTag: 'expense_btn',
-            onPressed: () async {
-              final res = await Navigator.push(
-                context, 
-                MaterialPageRoute(builder: (_) => const ExpenseEntryScreen())
-              );
-              if (res == true || mounted) {
-                _fetchDashboardMetrics();
-              }
-            },
-            label: const Text('Expense'),
-            icon: const Icon(Icons.remove),
-            backgroundColor: isGlass ? Colors.white : Colors.red.shade700,
-            foregroundColor: isGlass ? Colors.red : Colors.white,
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const SettingsScreen()),
+            ).then((_) => _fetchDashboardMetrics()),
           ),
-          const SizedBox(width: 10),
-          FloatingActionButton.extended(
-            heroTag: 'income_btn',
-            onPressed: () async {
-              final res = await Navigator.push(
-                context, 
-                MaterialPageRoute(builder: (_) => const IncomeEntryScreen())
-              );
-              if (res == true || mounted) {
-                _fetchDashboardMetrics();
-              }
-            },
-            label: const Text('Income'),
-            icon: const Icon(Icons.add),
-            backgroundColor: isGlass ? Colors.white : Colors.green.shade700,
-            foregroundColor: isGlass ? Colors.green : Colors.white,
+          IconButton(
+            icon: const Icon(Icons.logout),
+            onPressed: _logout,
           ),
         ],
       ),
-
-      body: Stack(
-        children: [
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            height: MediaQuery.of(context).size.height * 0.35,
-            child: Container(
-              decoration: BoxDecoration(
-                color: colorScheme.primary, 
-                borderRadius: const BorderRadius.only(
-                  bottomLeft: Radius.circular(32),
-                  bottomRight: Radius.circular(32),
-                ),
-              ),
-            ),
-          ),
-          
-          SafeArea(
-            child: RefreshIndicator(
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : RefreshIndicator(
               onRefresh: _fetchDashboardMetrics,
-              color: colorScheme.primary,
               child: SingleChildScrollView(
                 physics: const AlwaysScrollableScrollPhysics(),
-                padding: const EdgeInsets.only(top: 10, bottom: 80),
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    SizedBox(
-                      height: 220, 
-                      child: PageView(
-                        controller: _pageController,
-                        onPageChanged: (index) => setState(() => _currentPage = index),
-                        children: [
-                          _buildBalanceCard(
-                            context, 
-                            title: 'NET WORTH', 
-                            amount: _netWorth, 
-                            color: Colors.blueAccent, 
-                            icon: Icons.monetization_on_outlined
+                    // Purple Background Header + PageView
+                    Stack(
+                      children: [
+                        Container(
+                          height: 120,
+                          decoration: const BoxDecoration(
+                            color: Colors.deepPurple,
+                            borderRadius: BorderRadius.only(
+                              bottomLeft: Radius.circular(32),
+                              bottomRight: Radius.circular(32),
+                            ),
                           ),
-                          _buildBalanceCard(
-                            context, 
-                            title: 'WALLET CASH', 
-                            amount: _walletBalance, 
-                            color: const Color(0xFF00C853), 
-                            icon: Icons.wallet
-                          ),
-                          _buildBalanceCard(
-                            context, 
-                            title: 'BANK ACCOUNTS', 
-                            amount: _bankBalance, 
-                            color: const Color(0xFF6200EA), 
-                            icon: Icons.account_balance,
-                            onTap: () async {
-                              await Navigator.push(
-                                context, 
-                                MaterialPageRoute(builder: (_) => const AccountsScreen())
-                              );
-                              _fetchDashboardMetrics();
-                            },
-                          ),
-                        ],
-                      ),
-                    ),
-                    
-                    const SizedBox(height: 10),
-                    
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: List.generate(3, (index) => AnimatedContainer(
-                        duration: const Duration(milliseconds: 300),
-                        margin: const EdgeInsets.symmetric(horizontal: 4),
-                        width: _currentPage == index ? 24 : 8,
-                        height: 8,
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(4),
-                          color: _currentPage == index ? Colors.white : Colors.white.withValues(alpha: 0.4),
                         ),
-                      )),
+                        Column(
+                          children: [
+                            const SizedBox(height: 20),
+                            SizedBox(
+                              height: 200,
+                              child: PageView(
+                                controller: _pageController,
+                                onPageChanged: (index) => setState(() => _currentPage = index),
+                                children: [
+                                  _buildTopCard('Net Worth', _netWorth, Icons.monetization_on, Colors.blue),
+                                  _buildTopCard('Wallet Cash', _walletBalance, Icons.account_balance_wallet, Colors.green),
+                                  _buildTopCard('Bank Accounts', _bankBalance, Icons.account_balance, Colors.indigo),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            // Page Indicators
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: List.generate(3, (index) {
+                                return AnimatedContainer(
+                                  duration: const Duration(milliseconds: 300),
+                                  margin: const EdgeInsets.symmetric(horizontal: 4),
+                                  height: 8,
+                                  width: _currentPage == index ? 24 : 8,
+                                  decoration: BoxDecoration(
+                                    color: _currentPage == index ? Colors.deepPurple : Colors.grey.shade300,
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                );
+                              }),
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
 
-                    const SizedBox(height: 30),
+                    const SizedBox(height: 20),
 
+                    // MTD & Saved Summary Row
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 16),
                       child: Row(
                         children: [
                           Expanded(
-                            child: _buildMetricTile(
-                              'Total Saved', 
-                              '$_currencySymbol${_totalSaved.toStringAsFixed(0)}', 
-                              Colors.green, 
-                              isGlass
-                            )
+                            child: Card(
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                              elevation: 0,
+                              child: Padding(
+                                padding: const EdgeInsets.all(20),
+                                child: Column(
+                                  children: [
+                                    const Text('Total Saved', style: TextStyle(color: Colors.grey)),
+                                    const SizedBox(height: 8),
+                                    Text(
+                                      '$_currencySymbol${_totalSaved.toStringAsFixed(0)}',
+                                      style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.green),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
                           ),
-                          const SizedBox(width: 10),
+                          const SizedBox(width: 16),
                           Expanded(
-                            child: _buildMetricTile(
-                              'Expense (MTD)', 
-                              '$_currencySymbol${_expenseMTD.toStringAsFixed(0)}', 
-                              Colors.red, 
-                              isGlass
-                            )
+                            child: Card(
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                              elevation: 0,
+                              child: Padding(
+                                padding: const EdgeInsets.all(20),
+                                child: Column(
+                                  children: [
+                                    const Text('Expense (MTD)', style: TextStyle(color: Colors.grey)),
+                                    const SizedBox(height: 8),
+                                    Text(
+                                      '$_currencySymbol${_expenseMTD.toStringAsFixed(0)}',
+                                      style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.red),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
                           ),
                         ],
                       ),
                     ),
 
-                    const SizedBox(height: 20),
+                    const SizedBox(height: 16),
+
+                    // Hub & Reports Links
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Card(
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                        elevation: 0,
+                        child: ListTile(
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                          leading: CircleAvatar(
+                            backgroundColor: Colors.orange.shade50,
+                            child: const Icon(Icons.savings_outlined, color: Colors.orange),
+                          ),
+                          title: const Text('Commitment Hub', style: TextStyle(fontWeight: FontWeight.bold)),
+                          subtitle: Text(
+                            _pendingTotal > 0 ? 'Action Required: $_currencySymbol${_pendingTotal.toStringAsFixed(2)}' : 'All caught up!',
+                            style: TextStyle(color: _pendingTotal > 0 ? Colors.redAccent : Colors.grey),
+                          ),
+                          trailing: const Icon(Icons.chevron_right, color: Colors.grey),
+                          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const CommitmentHubScreen())).then((_) => _fetchDashboardMetrics()),
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(height: 12),
 
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: _buildActionCard(
-                        'Commitment Hub', 
-                        _pendingTotal > 0 
-                            ? 'Action Required: $_currencySymbol${_pendingTotal.toStringAsFixed(2)}' 
-                            : 'All caught up!',
-                        Icons.savings_outlined, 
-                        Colors.orange, 
-                        isGlass,
-                        () async {
-                          await Navigator.push(
-                            context, 
-                            MaterialPageRoute(builder: (_) => const CommitmentHubScreen())
-                          );
-                          _fetchDashboardMetrics();
-                        },
-                        subtitleColor: _pendingTotal > 0 ? Colors.redAccent : null,
+                      child: Card(
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                        elevation: 0,
+                        child: ListTile(
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                          leading: CircleAvatar(
+                            backgroundColor: Colors.deepPurple.shade50,
+                            child: const Icon(Icons.bar_chart, color: Colors.deepPurple),
+                          ),
+                          title: const Text('View Reports', style: TextStyle(fontWeight: FontWeight.bold)),
+                          subtitle: const Text('Analytics & History', style: TextStyle(color: Colors.grey)),
+                          trailing: const Icon(Icons.chevron_right, color: Colors.grey),
+                          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ReportsScreen())).then((_) => _fetchDashboardMetrics()),
+                        ),
                       ),
                     ),
-                    
-                    const SizedBox(height: 12),
-                    
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: _buildActionCard(
-                        'View Reports', 
-                        'Analytics & History', 
-                        Icons.bar_chart_rounded, 
-                        colorScheme.primary, 
-                        isGlass,
-                        () async {
-                          await Navigator.push(
-                            context, 
-                            MaterialPageRoute(builder: (_) => const ReportsScreen())
-                          );
-                          _fetchDashboardMetrics();
-                        }
-                      ),
-                    ),
+
+                    const SizedBox(height: 100), // padding for bottom buttons
                   ],
                 ),
               ),
             ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildMetricTile(String label, String value, Color color, bool isGlass) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: isGlass ? Colors.white.withValues(alpha: 0.1) : Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: isGlass ? Border.all(color: Colors.white12) : Border.all(color: Colors.grey.shade200),
-        boxShadow: isGlass ? [] : [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10)],
-      ),
-      child: Column(
-        children: [
-          Text(label, style: TextStyle(color: isGlass ? Colors.white70 : Colors.grey.shade700)),
-          const SizedBox(height: 5),
-          Text(value, style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: color)),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildActionCard(
-    String title, 
-    String subtitle, 
-    IconData icon, 
-    Color color, 
-    bool isGlass, 
-    VoidCallback onTap, 
-    {Color? subtitleColor}
-  ) {
-    final subColor = subtitleColor ?? (isGlass ? Colors.white60 : Colors.grey.shade600);
-
-    return Card(
-      color: isGlass ? Colors.white.withValues(alpha: 0.1) : Colors.white,
-      elevation: isGlass ? 0 : 2,
-      shadowColor: Colors.black.withValues(alpha: 0.05),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16), 
-        side: isGlass ? const BorderSide(color: Colors.white12) : BorderSide.none
-      ),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(16),
-        child: Padding(
-          padding: const EdgeInsets.all(20.0),
-          child: Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: isGlass ? Colors.white24 : color.withValues(alpha: 0.1),
-                  shape: BoxShape.circle,
+      // Floating Bottom Action Buttons
+      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
+      floatingActionButton: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+        child: Row(
+          children: [
+            Expanded(
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.red.shade600,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                  elevation: 4,
                 ),
-                child: Icon(icon, color: isGlass ? Colors.white : color),
+                onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ExpenseEntryScreen())).then((_) => _fetchDashboardMetrics()),
+                icon: const Icon(Icons.remove),
+                label: const Text('Expense', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
               ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title, 
-                      style: TextStyle(
-                        fontSize: 16, 
-                        fontWeight: FontWeight.bold, 
-                        color: isGlass ? Colors.white : Colors.grey.shade900
-                      )
-                    ),
-                    Text(
-                      subtitle, 
-                      style: TextStyle(
-                        color: subColor, 
-                        fontWeight: subtitleColor != null ? FontWeight.bold : FontWeight.normal
-                      )
-                    ),
-                  ],
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green.shade600,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                  elevation: 4,
                 ),
+                onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const IncomeEntryScreen())).then((_) => _fetchDashboardMetrics()),
+                icon: const Icon(Icons.add),
+                label: const Text('Income', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
               ),
-              Icon(Icons.arrow_forward_ios, size: 16, color: isGlass ? Colors.white30 : Colors.grey.shade400),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
