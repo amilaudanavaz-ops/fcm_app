@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../dashboard/dashboard_screen.dart';
+import '../initial_setup/initial_balance_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -14,15 +15,46 @@ class _LoginScreenState extends State<LoginScreen> {
   final _passwordController = TextEditingController();
   bool _isLoading = false;
 
+  Future<void> _routeUser() async {
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    if (userId == null) return;
+
+    // Check if the user already has a wallet/accounts
+    final accounts = await Supabase.instance.client
+        .from('accounts')
+        .select('id')
+        .eq('user_id', userId)
+        .limit(1);
+
+    if (mounted) {
+      if (accounts.isEmpty) {
+        // New user or user with no accounts
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (_) => const InitialBalanceScreen()),
+        );
+      } else {
+        // Existing user with accounts
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (_) => const DashboardScreen()),
+        );
+      }
+    }
+  }
+
   // 1. Sign Up Logic
   Future<void> _signUp() async {
     setState(() => _isLoading = true);
     try {
-      await Supabase.instance.client.auth.signUp(
+      final res = await Supabase.instance.client.auth.signUp(
         email: _emailController.text.trim(),
         password: _passwordController.text.trim(),
       );
-      if (mounted) {
+      
+      if (res.user != null) {
+        // Wait a brief moment for auth state to settle, then route
+        await Future.delayed(const Duration(milliseconds: 500));
+        await _routeUser();
+      } else if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Account Created! Please Sign In.')),
         );
@@ -47,12 +79,7 @@ class _LoginScreenState extends State<LoginScreen> {
         password: _passwordController.text.trim(),
       );
       
-      // Navigate to Dashboard on success
-      if (mounted) {
-        Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const DashboardScreen()),
-        );
-      }
+      await _routeUser();
     } on AuthException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
