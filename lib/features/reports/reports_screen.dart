@@ -1,9 +1,32 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import '../../core/services/export_service.dart';
 import 'analytics_view.dart';
 import 'history_view.dart';
 
-class ReportsScreen extends StatelessWidget {
+class ReportsScreen extends StatefulWidget {
   const ReportsScreen({super.key});
+
+  @override
+  State<ReportsScreen> createState() => _ReportsScreenState();
+}
+
+class _ReportsScreenState extends State<ReportsScreen> {
+  bool _isExporting = false;
+
+  Future<void> _handleExport() async {
+    HapticFeedback.mediumImpact();
+    setState(() => _isExporting = true);
+    try {
+      await ExportService.exportTransactionsToCSV();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Export Failed: $e'), backgroundColor: Colors.redAccent));
+      }
+    } finally {
+      if (mounted) setState(() => _isExporting = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -26,6 +49,15 @@ class ReportsScreen extends StatelessWidget {
             ),
           ),
           foregroundColor: Colors.white,
+          actions: [
+            _isExporting 
+              ? const Padding(padding: EdgeInsets.all(16.0), child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)))
+              : IconButton(
+                  icon: const Icon(Icons.file_download_outlined, color: Colors.white),
+                  tooltip: 'Export CSV',
+                  onPressed: _handleExport,
+                ),
+          ],
           bottom: TabBar(
             labelColor: Colors.white,
             unselectedLabelColor: Colors.white.withValues(alpha: 0.6),
@@ -43,8 +75,8 @@ class ReportsScreen extends StatelessWidget {
         body: const TabBarView(
           physics: BouncingScrollPhysics(),
           children: [
-            AnalyticsView(), // The Modernized Graphs
-            HistoryView(),   // The Detailed List
+            AnalyticsView(), 
+            HistoryView(),   
           ],
         ),
       ),

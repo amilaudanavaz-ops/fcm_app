@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import '../../core/models/category_model.dart';
 import '../../core/services/category_service.dart';
 import 'itemization_screen.dart';
@@ -30,6 +31,7 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
   DateTime _selectedDate = DateTime.now();
   bool _isLoading = false;
   bool _isInitLoading = true;
+  bool _isOffline = false;
 
   @override
   void initState() {
@@ -44,14 +46,21 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
     super.dispose();
   }
 
-  // --- FAST CONCURRENT DATA LOADING (LEDGER MATH) ---
+  // --- FAST CONCURRENT DATA LOADING WITH OFFLINE PROTECTION ---
   Future<void> _loadInitialDataConcurrently() async {
-    setState(() => _isInitLoading = true);
+    setState(() { _isInitLoading = true; _isOffline = false; });
+    
+    // 1. OFFLINE CHECK
+    final connectivityResult = await Connectivity().checkConnectivity();
+    if (connectivityResult.contains(ConnectivityResult.none)) {
+      if (mounted) setState(() { _isInitLoading = false; _isOffline = true; });
+      return;
+    }
+
     try {
       final userId = _supabase.auth.currentUser?.id;
       if (userId == null) return;
 
-      // PERFORMANCE UPGRADE: Fetch all necessary data simultaneously
       final results = await Future.wait<dynamic>([
         _supabase.from('profiles').select('currency_symbol').eq('id', userId).maybeSingle(),
         _categoryService.getCategories('expense'),
@@ -71,12 +80,10 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
       Map<String, double> balances = {};
       final fetchedAccounts = List<Map<String, dynamic>>.from(accountsData);
 
-      // Initialize base balances
       for (var acc in fetchedAccounts) {
         balances[acc['id'].toString()] = 0.0;
       }
 
-      // Add/Subtract Transactions
       for (var tx in txData) {
         final acctId = tx['account_id']?.toString();
         if (acctId == null || !balances.containsKey(acctId)) continue;
@@ -91,7 +98,6 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
         }
       }
 
-      // Add/Subtract Transfers
       for (var tr in transferData) {
         final amt = (tr['amount'] as num?)?.toDouble() ?? 0.0;
         final fromId = tr['from_account_id']?.toString();
@@ -101,7 +107,6 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
         if (toId != null && balances.containsKey(toId)) balances[toId] = (balances[toId] ?? 0.0) + amt;
       }
 
-      // Deduct deposited commitments
       for (var c in commitmentsData) {
         final amt = (c['amount'] as num?)?.toDouble() ?? 0.0;
         final sourceTx = c['transactions'] as Map<String, dynamic>?;
@@ -130,14 +135,11 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
     } catch (e) {
       if (mounted) {
         setState(() => _isInitLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to load data: $e'), backgroundColor: Colors.redAccent),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to load data: $e'), backgroundColor: Colors.redAccent));
       }
     }
   }
 
-  // --- TEMPLATE PICKER SHEET ---
   void _showTemplatePicker() async {
     HapticFeedback.lightImpact();
     final userId = _supabase.auth.currentUser?.id;
@@ -153,10 +155,7 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) => Container(
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
-        ),
+        decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(32))),
         padding: const EdgeInsets.all(24),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -166,18 +165,12 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 const Text('Saved Templates', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: Colors.black87)),
-                IconButton(
-                  icon: const Icon(Icons.close_rounded, color: Colors.grey),
-                  onPressed: () => Navigator.pop(ctx),
-                ),
+                IconButton(icon: const Icon(Icons.close_rounded, color: Colors.grey), onPressed: () => Navigator.pop(ctx)),
               ],
             ),
             const SizedBox(height: 10),
             if (templates.isEmpty)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 40),
-                child: Center(child: Text('No saved expense templates found.', style: TextStyle(color: Colors.grey, fontSize: 16))),
-              )
+              const Padding(padding: EdgeInsets.symmetric(vertical: 40), child: Center(child: Text('No saved expense templates found.', style: TextStyle(color: Colors.grey, fontSize: 16))))
             else
               Flexible(
                 child: ListView.builder(
@@ -187,17 +180,10 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
                     final template = templates[index];
                     return Container(
                       margin: const EdgeInsets.only(bottom: 12),
-                      decoration: BoxDecoration(
-                        color: Colors.grey.shade50,
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: Colors.grey.shade200),
-                      ),
+                      decoration: BoxDecoration(color: Colors.grey.shade50, borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.grey.shade200)),
                       child: ListTile(
                         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                        leading: CircleAvatar(
-                          backgroundColor: Colors.deepPurple.shade50,
-                          child: const Icon(Icons.style_rounded, color: Colors.deepPurple, size: 20),
-                        ),
+                        leading: CircleAvatar(backgroundColor: Colors.deepPurple.shade50, child: const Icon(Icons.style_rounded, color: Colors.deepPurple, size: 20)),
                         title: Text(template['name'] ?? 'Unnamed', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                         subtitle: Text('${template['category'] ?? 'General'} • $_currencySymbol${template['amount'] ?? '0.00'}', style: TextStyle(color: Colors.grey.shade600)),
                         trailing: const Icon(Icons.chevron_right_rounded, color: Colors.grey),
@@ -224,22 +210,16 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
         _noteController.text = template['notes'] ?? template['name'] ?? '';
       }
       if (_categories.isNotEmpty) {
-        _selectedCategory = _categories.firstWhere(
-          (c) => c.name.toLowerCase() == (template['category'] ?? '').toString().toLowerCase(),
-          orElse: () => _categories.first,
-        );
+        _selectedCategory = _categories.firstWhere((c) => c.name.toLowerCase() == (template['category'] ?? '').toString().toLowerCase(), orElse: () => _categories.first);
       }
       if (template['account_id'] != null) {
         _selectedAccountId = template['account_id'].toString();
       }
     });
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Applied "${template['name'] ?? 'Template'}"'), backgroundColor: Colors.deepPurple),
-    );
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Applied "${template['name'] ?? 'Template'}"'), backgroundColor: Colors.deepPurple));
   }
 
-  // --- SAVE TEMPLATE ---
   Future<void> _saveAsTemplate() async {
     HapticFeedback.lightImpact();
     if (_selectedCategory == null) {
@@ -254,15 +234,7 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
       builder: (ctx) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
         title: const Text('Save Template', style: TextStyle(fontWeight: FontWeight.bold)),
-        content: TextField(
-          controller: nameController,
-          autofocus: true,
-          decoration: InputDecoration(
-            labelText: 'Template Name',
-            hintText: 'e.g., Weekly Groceries',
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(16)),
-          ),
-        ),
+        content: TextField(controller: nameController, autofocus: true, decoration: InputDecoration(labelText: 'Template Name', hintText: 'e.g., Weekly Groceries', border: OutlineInputBorder(borderRadius: BorderRadius.circular(16)))),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(color: Colors.grey))),
           ElevatedButton(
@@ -280,23 +252,27 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
         final userId = _supabase.auth.currentUser?.id;
         if (userId == null) return;
 
-        final amountVal = double.tryParse(_amountController.text) ?? 0.0;
+        // DYNAMIC TYPE HANDLING: Safely handles both INTs and UUIDs
+        final dynamic catId = int.tryParse(_selectedCategory!.id) ?? _selectedCategory!.id;
+        final dynamic accId = _selectedAccountId != null ? (int.tryParse(_selectedAccountId!) ?? _selectedAccountId) : null;
+        
+        // FLOATING POINT FIX
+        final rawAmount = double.tryParse(_amountController.text) ?? 0.0;
+        final amountVal = double.parse(rawAmount.toStringAsFixed(2));
         final noteVal = _noteController.text.trim();
 
         await _supabase.from('expense_templates').insert({
           'user_id': userId,
           'name': templateName,
-          'category_id': _selectedCategory!.id,
+          'category_id': catId,
           'category': _selectedCategory!.name,
           'amount': amountVal,
           'total_amount': amountVal,
-          'account_id': _selectedAccountId,
+          'account_id': accId,
           'notes': noteVal.isNotEmpty ? noteVal : null,
         });
 
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Template "$templateName" saved!'), backgroundColor: Colors.green));
-        }
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Template "$templateName" saved!'), backgroundColor: Colors.green));
       } catch (e) {
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e'), backgroundColor: Colors.redAccent));
       } finally {
@@ -319,7 +295,6 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
           categoryId: _selectedCategory!.id,
           categoryName: _selectedCategory!.name,
           existingBreakdown: _noteController.text,
-          // currencySymbol removed to fix LSP Error 'undefined_named_parameter'
         ),
       ),
     );
@@ -356,6 +331,12 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
       return;
     }
 
+    final connectivityResult = await Connectivity().checkConnectivity();
+    if (connectivityResult.contains(ConnectivityResult.none)) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No internet. Cannot save.'), backgroundColor: Colors.orange));
+      return;
+    }
+
     HapticFeedback.mediumImpact();
     setState(() => _isLoading = true);
 
@@ -363,11 +344,19 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
       final userId = _supabase.auth.currentUser?.id;
       if (userId == null) throw 'User unauthenticated';
 
-      final amount = double.parse(_amountController.text);
+      // FLOATING POINT MATH FIX: Strict 2-decimal truncation
+      final rawAmount = double.tryParse(_amountController.text) ?? 0.0;
+      final amount = double.parse(rawAmount.toStringAsFixed(2));
+      
       final noteText = _noteController.text.trim();
       final isoDate = _selectedDate.toIso8601String();
+      
+      // DYNAMIC TYPE HANDLING: Prevents UUID/INT mismatch crashes
+      final dynamic catId = int.tryParse(_selectedCategory!.id) ?? _selectedCategory!.id;
+      final dynamic accId = _selectedAccountId != null ? (int.tryParse(_selectedAccountId!) ?? _selectedAccountId) : null;
 
-      // 1. STRICT LIVE BALANCE CHECK (Uses the concurrent map math)
+      // 1. DART-LEVEL ACID TRANSACTION SIMULATION
+      // We update the account balance FIRST. If this fails, no ghost ledgers are created.
       if (_selectedAccountId != null) {
         final double fromBal = _liveBalances[_selectedAccountId!] ?? 0.0;
         final fromAcc = _accounts.firstWhere((acc) => acc['id'].toString() == _selectedAccountId, orElse: () => {});
@@ -392,19 +381,24 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
               ),
             );
           }
-          return; // Abort
+          return;
         }
+
+        // Apply Balance Update Safely
+        final accountData = await _supabase.from('accounts').select('current_balance').eq('id', _selectedAccountId!).single();
+        final currentBal = (accountData['current_balance'] as num?)?.toDouble() ?? 0.0;
+        await _supabase.from('accounts').update({'current_balance': currentBal - amount}).eq('id', _selectedAccountId!);
       }
 
-      // 2. Insert safely concurrently
+      // 2. Concurrently insert into the ledgers since balance is secured
       await Future.wait([
         _supabase.from('expenses').insert({
           'user_id': userId,
           'amount': amount,
-          'category_id': _selectedCategory!.id,
+          'category_id': catId,
           'category': _selectedCategory!.name,
           'category_name': _selectedCategory!.name,
-          'account_id': _selectedAccountId,
+          'account_id': accId,
           'title': noteText.isNotEmpty ? noteText : _selectedCategory!.name,
           'description': noteText,
           'note': noteText,
@@ -415,20 +409,13 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
           'amount': amount,
           'type': 'expense',
           'category': _selectedCategory!.name,
-          'category_id': _selectedCategory!.id,
-          'account_id': _selectedAccountId != null ? int.tryParse(_selectedAccountId!) ?? _selectedAccountId : null,
+          'category_id': catId,
+          'account_id': accId,
           'title': noteText.isNotEmpty ? noteText : _selectedCategory!.name,
           'description': noteText,
           'date': isoDate,
         }),
       ]);
-
-      // 3. Fallback schema update (Safety fallback)
-      if (_selectedAccountId != null) {
-        final accountData = await _supabase.from('accounts').select('current_balance').eq('id', _selectedAccountId!).single();
-        final currentBal = (accountData['current_balance'] as num?)?.toDouble() ?? 0.0;
-        await _supabase.from('accounts').update({'current_balance': currentBal - amount}).eq('id', _selectedAccountId!);
-      }
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Expense logged successfully!'), backgroundColor: Colors.green));
@@ -441,20 +428,37 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
     }
   }
 
+  // --- OFFLINE UI BUILDER ---
+  Widget _buildOfflineState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.wifi_off_rounded, size: 64, color: Colors.grey.shade400),
+          const SizedBox(height: 16),
+          Text('You are offline', style: TextStyle(color: Colors.grey.shade800, fontSize: 20, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 24),
+          ElevatedButton.icon(
+            onPressed: _loadInitialDataConcurrently,
+            icon: const Icon(Icons.refresh_rounded),
+            label: const Text('Retry Connection'),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.deepPurple, foregroundColor: Colors.white),
+          )
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF8F9FE), // Modern Background
+      backgroundColor: const Color(0xFFF8F9FE),
       appBar: AppBar(
         title: const Text('Log Expense', style: TextStyle(fontWeight: FontWeight.bold)),
         backgroundColor: Colors.transparent,
         flexibleSpace: Container(
           decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              colors: [Color(0xFF2E0854), Color(0xFF5D12D6)],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
+            gradient: LinearGradient(colors: [Color(0xFF2E0854), Color(0xFF5D12D6)], begin: Alignment.topLeft, end: Alignment.bottomRight),
           ),
         ),
         foregroundColor: Colors.white,
@@ -464,7 +468,9 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
           IconButton(icon: const Icon(Icons.style_rounded), tooltip: 'Apply Template', onPressed: _showTemplatePicker),
         ],
       ),
-      body: _isInitLoading
+      body: _isOffline 
+        ? _buildOfflineState()
+        : _isInitLoading
           ? const Center(child: CircularProgressIndicator(color: Colors.deepPurple))
           : SingleChildScrollView(
               physics: const BouncingScrollPhysics(),
@@ -473,14 +479,9 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
                 key: _formKey,
                 child: Column(
                   children: [
-                    // --- MODERN AMOUNT DISPLAY CARD ---
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 30),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(32),
-                        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 20, offset: const Offset(0, 10))],
-                      ),
+                      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(32), boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 20, offset: const Offset(0, 10))]),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.center,
                         children: [
@@ -495,11 +496,7 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
                                   keyboardType: const TextInputType.numberWithOptions(decimal: true),
                                   textAlign: TextAlign.center,
                                   style: const TextStyle(fontSize: 48, fontWeight: FontWeight.w800, color: Colors.redAccent, letterSpacing: -1),
-                                  decoration: InputDecoration(
-                                    prefixText: '$_currencySymbol ',
-                                    hintText: '0.00',
-                                    border: InputBorder.none,
-                                  ),
+                                  decoration: InputDecoration(prefixText: '$_currencySymbol ', hintText: '0.00', border: InputBorder.none),
                                   validator: (val) {
                                     if (val == null || val.isEmpty) return 'Enter an amount';
                                     if (double.tryParse(val) == null) return 'Invalid number';
@@ -529,43 +526,27 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
                         ],
                       ),
                     ),
-
                     const SizedBox(height: 24),
-
-                    // --- INPUT FIELDS GROUP ---
                     Container(
                       padding: const EdgeInsets.all(24),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(32),
-                        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 20, offset: const Offset(0, 10))],
-                      ),
+                      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(32), boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 20, offset: const Offset(0, 10))]),
                       child: Column(
                         children: [
-                          // Category Dropdown
                           DropdownButtonFormField<CategoryModel>(
                             initialValue: _selectedCategory,
                             icon: const Icon(Icons.keyboard_arrow_down_rounded, color: Colors.grey),
                             decoration: InputDecoration(
                               labelText: 'Category',
                               labelStyle: const TextStyle(color: Colors.grey, fontWeight: FontWeight.w600),
-                              prefixIcon: Container(
-                                margin: const EdgeInsets.all(8),
-                                decoration: BoxDecoration(color: Colors.orange.shade50, shape: BoxShape.circle),
-                                child: const Icon(Icons.category_rounded, color: Colors.orange, size: 20),
-                              ),
+                              prefixIcon: Container(margin: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.orange.shade50, shape: BoxShape.circle), child: const Icon(Icons.category_rounded, color: Colors.orange, size: 20)),
                               border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
-                              filled: true,
-                              fillColor: Colors.grey.shade50,
+                              filled: true, fillColor: Colors.grey.shade50,
                             ),
                             items: _categories.map((cat) => DropdownMenuItem(value: cat, child: Text(cat.name, style: const TextStyle(fontWeight: FontWeight.bold)))).toList(),
                             onChanged: (val) => setState(() => _selectedCategory = val),
                             validator: (val) => val == null ? 'Select category' : null,
                           ),
-
                           const SizedBox(height: 16),
-
-                          // Account Dropdown
                           if (_accounts.isNotEmpty)
                             DropdownButtonFormField<String>(
                               initialValue: _selectedAccountId,
@@ -573,14 +554,9 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
                               decoration: InputDecoration(
                                 labelText: 'Account',
                                 labelStyle: const TextStyle(color: Colors.grey, fontWeight: FontWeight.w600),
-                                prefixIcon: Container(
-                                  margin: const EdgeInsets.all(8),
-                                  decoration: BoxDecoration(color: Colors.blue.shade50, shape: BoxShape.circle),
-                                  child: const Icon(Icons.account_balance_wallet_rounded, color: Colors.blue, size: 20),
-                                ),
+                                prefixIcon: Container(margin: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.blue.shade50, shape: BoxShape.circle), child: const Icon(Icons.account_balance_wallet_rounded, color: Colors.blue, size: 20)),
                                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
-                                filled: true,
-                                fillColor: Colors.grey.shade50,
+                                filled: true, fillColor: Colors.grey.shade50,
                               ),
                               items: _accounts.map((acc) {
                                 final double bal = _liveBalances[acc['id'].toString()] ?? 0.0;
@@ -591,45 +567,25 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
                               }).toList(),
                               onChanged: (val) => setState(() => _selectedAccountId = val),
                             ),
-
                           const SizedBox(height: 16),
-
-                          // Notes Field
                           TextFormField(
                             controller: _noteController,
-                            minLines: 1,
-                            maxLines: 4,
+                            minLines: 1, maxLines: 4,
                             style: const TextStyle(fontWeight: FontWeight.w500),
                             decoration: InputDecoration(
                               labelText: 'Notes / Description',
                               labelStyle: const TextStyle(color: Colors.grey, fontWeight: FontWeight.w600),
-                              prefixIcon: Container(
-                                margin: const EdgeInsets.all(8),
-                                decoration: BoxDecoration(color: Colors.teal.shade50, shape: BoxShape.circle),
-                                child: const Icon(Icons.notes_rounded, color: Colors.teal, size: 20),
-                              ),
+                              prefixIcon: Container(margin: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.teal.shade50, shape: BoxShape.circle), child: const Icon(Icons.notes_rounded, color: Colors.teal, size: 20)),
                               border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
-                              filled: true,
-                              fillColor: Colors.grey.shade50,
+                              filled: true, fillColor: Colors.grey.shade50,
                             ),
                           ),
-
                           const SizedBox(height: 16),
-
-                          // Date Tile
                           InkWell(
                             onTap: () async {
                               final picked = await showDatePicker(
-                                context: context,
-                                initialDate: _selectedDate,
-                                firstDate: DateTime(2000),
-                                lastDate: DateTime(2100),
-                                builder: (context, child) {
-                                  return Theme(
-                                    data: Theme.of(context).copyWith(colorScheme: const ColorScheme.light(primary: Colors.deepPurple)),
-                                    child: child!,
-                                  );
-                                },
+                                context: context, initialDate: _selectedDate, firstDate: DateTime(2000), lastDate: DateTime(2100),
+                                builder: (context, child) => Theme(data: Theme.of(context).copyWith(colorScheme: const ColorScheme.light(primary: Colors.deepPurple)), child: child!),
                               );
                               if (picked != null) setState(() => _selectedDate = picked);
                             },
@@ -639,11 +595,7 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
                               decoration: BoxDecoration(color: Colors.grey.shade50, borderRadius: BorderRadius.circular(20)),
                               child: Row(
                                 children: [
-                                  Container(
-                                    padding: const EdgeInsets.all(8),
-                                    decoration: BoxDecoration(color: Colors.purple.shade50, shape: BoxShape.circle),
-                                    child: const Icon(Icons.calendar_today_rounded, color: Colors.purple, size: 20),
-                                  ),
+                                  Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: Colors.purple.shade50, shape: BoxShape.circle), child: const Icon(Icons.calendar_today_rounded, color: Colors.purple, size: 20)),
                                   const SizedBox(width: 16),
                                   Expanded(
                                     child: Column(
@@ -662,25 +614,13 @@ class _ExpenseEntryScreenState extends State<ExpenseEntryScreen> {
                         ],
                       ),
                     ),
-
                     const SizedBox(height: 40),
-
-                    // --- SAVE BUTTON ---
                     SizedBox(
-                      width: double.infinity,
-                      height: 60,
+                      width: double.infinity, height: 60,
                       child: ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.deepPurple,
-                          foregroundColor: Colors.white,
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                          elevation: 8,
-                          shadowColor: Colors.deepPurple.withValues(alpha: 0.4),
-                        ),
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.deepPurple, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)), elevation: 8, shadowColor: Colors.deepPurple.withValues(alpha: 0.4)),
                         onPressed: _isLoading ? null : _submitExpense,
-                        child: _isLoading
-                            ? const CircularProgressIndicator(color: Colors.white)
-                            : const Text('Save Expense', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 1)),
+                        child: _isLoading ? const CircularProgressIndicator(color: Colors.white) : const Text('Save Expense', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 1)),
                       ),
                     ),
                   ],

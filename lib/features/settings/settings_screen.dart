@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../categories/categories_screen.dart';
+import '../auth/login_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -86,6 +87,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error saving settings: $e'), backgroundColor: Colors.redAccent));
+      }
+    }
+  }
+
+  Future<void> _signOut() async {
+    HapticFeedback.mediumImpact();
+    try {
+      await _supabase.auth.signOut();
+      if (mounted) {
+        // Clear navigation stack and route to Login
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const LoginScreen()),
+          (route) => false,
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to sign out: $e'), backgroundColor: Colors.redAccent));
       }
     }
   }
@@ -276,6 +295,53 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                       Text('Manage Categories', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.black87)),
                                       SizedBox(height: 2),
                                       Text('Add or delete income & expense tags', style: TextStyle(color: Colors.grey, fontSize: 12, fontWeight: FontWeight.w500)),
+                                    ],
+                                  ),
+                                ),
+                                const Icon(Icons.chevron_right_rounded, color: Colors.grey),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  const SizedBox(height: 32),
+
+                  // --- ACCOUNT AUTHENTICATION SECTION ---
+                  const Text('Account', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800, color: Colors.grey, letterSpacing: 1.2)),
+                  const SizedBox(height: 12),
+
+                  Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(32),
+                      boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 20, offset: const Offset(0, 10))],
+                    ),
+                    child: Column(
+                      children: [
+                        // Sign Out Button
+                        InkWell(
+                          onTap: _signOut,
+                          borderRadius: BorderRadius.circular(32),
+                          child: Padding(
+                            padding: const EdgeInsets.all(24.0),
+                            child: Row(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.all(10),
+                                  decoration: BoxDecoration(color: Colors.red.shade50, shape: BoxShape.circle),
+                                  child: const Icon(Icons.logout_rounded, color: Colors.redAccent, size: 22),
+                                ),
+                                const SizedBox(width: 16),
+                                const Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text('Sign Out', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.redAccent)),
+                                      SizedBox(height: 2),
+                                      Text('Securely log out of your device', style: TextStyle(color: Colors.grey, fontSize: 12, fontWeight: FontWeight.w500)),
                                     ],
                                   ),
                                 ),

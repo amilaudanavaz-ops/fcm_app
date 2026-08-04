@@ -94,6 +94,37 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  // 3. Password Reset Logic
+  Future<void> _resetPassword() async {
+    HapticFeedback.lightImpact();
+    final email = _emailController.text.trim();
+    
+    if (email.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter your email address first.'), backgroundColor: Colors.orange),
+      );
+      return;
+    }
+
+    setState(() => _isLoading = true);
+    try {
+      await Supabase.instance.client.auth.resetPasswordForEmail(email);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Password reset link sent! Check your inbox.'), backgroundColor: Colors.green),
+        );
+      }
+    } on AuthException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.message), backgroundColor: Colors.redAccent),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -110,13 +141,11 @@ class _LoginScreenState extends State<LoginScreen> {
           child: LayoutBuilder(
             builder: (context, constraints) {
               return SingleChildScrollView(
-                // Clip.none allows the hidden watermark to render outside the normal scroll bounds
                 clipBehavior: Clip.none,
-                // AlwaysScrollable ensures the bounce effect works even if content doesn't exceed screen height
                 physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
                 child: ConstrainedBox(
                   constraints: BoxConstraints(
-                    minHeight: constraints.maxHeight, // Fills the screen height
+                    minHeight: constraints.maxHeight, 
                   ),
                   child: Stack(
                     clipBehavior: Clip.none,
@@ -132,10 +161,10 @@ class _LoginScreenState extends State<LoginScreen> {
                           children: [
                             // --- LOGO / BRANDING ---
                             Image.asset(
-                              'assets/icon.png', // Directly rendering the transparent icon
-                              width: 140, // Scaled up slightly since the text is gone
+                              'assets/icon.png', 
+                              width: 140, 
                               height: 140,
-                              fit: BoxFit.contain, // Ensures the edges aren't cropped
+                              fit: BoxFit.contain, 
                             ),
                             const SizedBox(height: 24),
                             Text('Manage your wealth seamlessly', style: TextStyle(fontSize: 15, color: Colors.white.withValues(alpha: 0.7), fontWeight: FontWeight.w500)),
@@ -192,7 +221,22 @@ class _LoginScreenState extends State<LoginScreen> {
                                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
                                     ),
                                   ),
-                                  const SizedBox(height: 32),
+                                  
+                                  // Forgot Password Button
+                                  Align(
+                                    alignment: Alignment.centerRight,
+                                    child: TextButton(
+                                      onPressed: _resetPassword,
+                                      style: TextButton.styleFrom(
+                                        padding: const EdgeInsets.only(top: 8, bottom: 16),
+                                        minimumSize: Size.zero,
+                                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                      ),
+                                      child: const Text('Forgot Password?', style: TextStyle(color: Colors.deepPurple, fontWeight: FontWeight.w700, fontSize: 13)),
+                                    ),
+                                  ),
+                                  
+                                  const SizedBox(height: 8),
                                   
                                   // Buttons
                                   if (_isLoading)
@@ -238,7 +282,6 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                       
                       // --- HIDDEN OVERSCROLL WATERMARK ---
-                      // Positioned negatively at the bottom. Only visible when dragging up (overscroll).
                       Positioned(
                         bottom: -60,
                         left: 0,

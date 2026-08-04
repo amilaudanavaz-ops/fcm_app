@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 
 class TransferScreen extends StatefulWidget {
   const TransferScreen({super.key});
@@ -17,6 +18,7 @@ class _TransferScreenState extends State<TransferScreen> {
   DateTime _selectedDate = DateTime.now();
   bool _isLoading = false;
   bool _isInitLoading = true;
+  bool _isOffline = false;
 
   List<Map<String, dynamic>> _accounts = [];
   Map<String, double> _liveBalances = {};
@@ -36,14 +38,21 @@ class _TransferScreenState extends State<TransferScreen> {
     super.dispose();
   }
 
-  // --- FAST CONCURRENT DATA LOADING (LEDGER MATH) ---
+  // --- FAST CONCURRENT DATA LOADING WITH OFFLINE PROTECTION ---
   Future<void> _loadInitialDataConcurrently() async {
-    setState(() => _isInitLoading = true);
+    setState(() { _isInitLoading = true; _isOffline = false; });
+    
+    // 1. OFFLINE CHECK
+    final connectivityResult = await Connectivity().checkConnectivity();
+    if (connectivityResult.contains(ConnectivityResult.none)) {
+      if (mounted) setState(() { _isInitLoading = false; _isOffline = true; });
+      return;
+    }
+
     try {
       final userId = _supabase.auth.currentUser?.id;
       if (userId == null) return;
 
-      // PERFORMANCE UPGRADE: Fetch everything simultaneously
       final results = await Future.wait<dynamic>([
         _supabase.from('profiles').select('currency_symbol').eq('id', userId).maybeSingle(),
         _supabase.from('accounts').select('id, name, type').eq('user_id', userId).order('id'),
@@ -61,12 +70,10 @@ class _TransferScreenState extends State<TransferScreen> {
       Map<String, double> balances = {};
       final fetchedAccounts = List<Map<String, dynamic>>.from(accountsData);
 
-      // Initialize base balances to 0
       for (var acc in fetchedAccounts) {
         balances[acc['id'].toString()] = 0.0;
       }
 
-      // Add/Subtract Transactions
       for (var tx in txData) {
         final acctId = tx['account_id']?.toString();
         if (acctId == null || !balances.containsKey(acctId)) continue;
@@ -81,7 +88,6 @@ class _TransferScreenState extends State<TransferScreen> {
         }
       }
 
-      // Add/Subtract Transfers
       for (var tr in transferData) {
         final amt = (tr['amount'] as num?)?.toDouble() ?? 0.0;
         final fromId = tr['from_account_id']?.toString();
@@ -91,7 +97,6 @@ class _TransferScreenState extends State<TransferScreen> {
         if (toId != null && balances.containsKey(toId)) balances[toId] = (balances[toId] ?? 0.0) + amt;
       }
 
-      // Deduct deposited commitments
       for (var c in commitmentsData) {
         final amt = (c['amount'] as num?)?.toDouble() ?? 0.0;
         final sourceTx = c['transactions'] as Map<String, dynamic>?;
@@ -107,7 +112,6 @@ class _TransferScreenState extends State<TransferScreen> {
           _accounts = fetchedAccounts;
           _liveBalances = balances;
 
-          // Auto-select first two accounts if available
           if (_accounts.length >= 2) {
             _fromAccountId = _accounts[0]['id'].toString();
             _toAccountId = _accounts[1]['id'].toString();
@@ -120,9 +124,7 @@ class _TransferScreenState extends State<TransferScreen> {
     } catch (e) {
       if (mounted) {
         setState(() => _isInitLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to load accounts: $e'), backgroundColor: Colors.redAccent),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to load accounts: $e'), backgroundColor: Colors.redAccent));
       }
     }
   }
@@ -140,7 +142,17 @@ class _TransferScreenState extends State<TransferScreen> {
       return;
     }
 
-    final amount = double.tryParse(_amountController.text) ?? 0.0;
+    // OFFLINE CHECK
+    final connectivityResult = await Connectivity().checkConnectivity();
+    if (connectivityResult.contains(ConnectivityResult.none)) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No internet. Cannot execute transfer.'), backgroundColor: Colors.orange));
+      return;
+    }
+
+    // FLOATING POINT MATH FIX: Strict 2-decimal truncation
+    final rawAmount = double.tryParse(_amountController.text) ?? 0.0;
+    final amount = double.parse(rawAmount.toStringAsFixed(2));
+
     if (amount <= 0) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter a valid amount greater than 0')));
       return;
@@ -180,21 +192,27 @@ class _TransferScreenState extends State<TransferScreen> {
             ),
           );
         }
-        return; // Abort transfer
+        return; 
       }
 
-      // 2. Execute Transfer (and optionally update the legacy fallback column concurrently)
+      // DYNAMIC TYPE HANDLING: Prevents UUID/INT mismatch crashes
+      final dynamic fromId = int.tryParse(_fromAccountId!) ?? _fromAccountId!;
+      final dynamic toId = int.tryParse(_toAccountId!) ?? _toAccountId!;
+
+      final double newFromBal = double.parse((fromBal - amount).toStringAsFixed(2));
+      final double newToBal = double.parse(((_liveBalances[_toAccountId!] ?? 0.0) + amount).toStringAsFixed(2));
+
+      // 2. DART-LEVEL SAFE CONCURRENT EXECUTION
       await Future.wait([
         _supabase.from('transfers').insert({
           'user_id': userId,
-          'from_account_id': int.parse(_fromAccountId!),
-          'to_account_id': int.parse(_toAccountId!),
+          'from_account_id': fromId,
+          'to_account_id': toId,
           'amount': amount,
           'date': _selectedDate.toIso8601String(),
         }),
-        // Legacy fallback updates to prevent other un-updated screens from completely breaking
-        _supabase.from('accounts').update({'current_balance': fromBal - amount}).eq('id', _fromAccountId!),
-        _supabase.from('accounts').update({'current_balance': (_liveBalances[_toAccountId!] ?? 0.0) + amount}).eq('id', _toAccountId!),
+        _supabase.from('accounts').update({'current_balance': newFromBal}).eq('id', _fromAccountId!),
+        _supabase.from('accounts').update({'current_balance': newToBal}).eq('id', _toAccountId!),
       ]);
 
       if (mounted) {
@@ -212,10 +230,31 @@ class _TransferScreenState extends State<TransferScreen> {
     }
   }
 
+  // --- OFFLINE UI BUILDER ---
+  Widget _buildOfflineState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.wifi_off_rounded, size: 64, color: Colors.grey.shade400),
+          const SizedBox(height: 16),
+          Text('You are offline', style: TextStyle(color: Colors.grey.shade800, fontSize: 20, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 24),
+          ElevatedButton.icon(
+            onPressed: _loadInitialDataConcurrently,
+            icon: const Icon(Icons.refresh_rounded),
+            label: const Text('Retry Connection'),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.blueAccent, foregroundColor: Colors.white),
+          )
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF8F9FE), // Modern light background
+      backgroundColor: const Color(0xFFF8F9FE), 
       appBar: AppBar(
         title: const Text('Internal Transfer', style: TextStyle(fontWeight: FontWeight.bold)),
         backgroundColor: Colors.transparent,
@@ -231,7 +270,9 @@ class _TransferScreenState extends State<TransferScreen> {
         foregroundColor: Colors.white,
         elevation: 0,
       ),
-      body: _isInitLoading
+      body: _isOffline 
+        ? _buildOfflineState()
+        : _isInitLoading
           ? const Center(child: CircularProgressIndicator(color: Colors.deepPurple))
           : _accounts.length < 2
               ? Center(
@@ -277,7 +318,6 @@ class _TransferScreenState extends State<TransferScreen> {
                     key: _formKey,
                     child: Column(
                       children: [
-                        // --- MODERN AMOUNT DISPLAY CARD ---
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 30),
                           decoration: BoxDecoration(
@@ -306,7 +346,7 @@ class _TransferScreenState extends State<TransferScreen> {
                                       ),
                                       validator: (val) {
                                         if (val == null || val.isEmpty) return 'Enter an amount';
-                                        if (double.tryParse(val) == null || double.parse(val!) <= 0) return 'Invalid amount';
+                                        if (double.tryParse(val) == null || double.parse(val) <= 0) return 'Invalid amount';
                                         return null;
                                       },
                                     ),
@@ -319,7 +359,6 @@ class _TransferScreenState extends State<TransferScreen> {
 
                         const SizedBox(height: 24),
 
-                        // --- INPUT FIELDS GROUP ---
                         Container(
                           padding: const EdgeInsets.all(24),
                           decoration: BoxDecoration(
@@ -329,7 +368,6 @@ class _TransferScreenState extends State<TransferScreen> {
                           ),
                           child: Column(
                             children: [
-                              // Source Account
                               DropdownButtonFormField<String>(
                                 value: _fromAccountId,
                                 icon: const Icon(Icons.keyboard_arrow_down_rounded, color: Colors.grey),
@@ -358,7 +396,6 @@ class _TransferScreenState extends State<TransferScreen> {
                                 onChanged: (val) => setState(() => _fromAccountId = val),
                               ),
 
-                              // Flow Indicator
                               Padding(
                                 padding: const EdgeInsets.symmetric(vertical: 16.0),
                                 child: Container(
@@ -368,7 +405,6 @@ class _TransferScreenState extends State<TransferScreen> {
                                 ),
                               ),
 
-                              // Destination Account
                               DropdownButtonFormField<String>(
                                 value: _toAccountId,
                                 icon: const Icon(Icons.keyboard_arrow_down_rounded, color: Colors.grey),
@@ -399,7 +435,6 @@ class _TransferScreenState extends State<TransferScreen> {
 
                               const SizedBox(height: 24),
 
-                              // Date Tile
                               InkWell(
                                 onTap: () async {
                                   final picked = await showDatePicker(
@@ -448,7 +483,6 @@ class _TransferScreenState extends State<TransferScreen> {
 
                         const SizedBox(height: 40),
 
-                        // --- SAVE BUTTON ---
                         SizedBox(
                           width: double.infinity,
                           height: 60,

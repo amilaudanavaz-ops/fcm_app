@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import '../dashboard/dashboard_screen.dart';
 
 class InitialBalanceScreen extends StatefulWidget {
@@ -46,11 +47,21 @@ class _InitialBalanceScreenState extends State<InitialBalanceScreen> {
     final textVal = _amountController.text.trim();
     if (textVal.isEmpty) return;
 
+    // OFFLINE CHECK
+    final connectivityResult = await Connectivity().checkConnectivity();
+    if (connectivityResult.contains(ConnectivityResult.none)) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No internet connection. Cannot save your wallet.'), backgroundColor: Colors.orange));
+      return;
+    }
+
     HapticFeedback.mediumImpact();
     setState(() => _isLoading = true);
 
     final userId = Supabase.instance.client.auth.currentUser!.id;
-    final amount = double.tryParse(textVal) ?? 0.0;
+    
+    // FLOATING POINT MATH FIX: Strict 2-decimal truncation
+    final rawAmount = double.tryParse(textVal) ?? 0.0;
+    final amount = double.parse(rawAmount.toStringAsFixed(2));
 
     try {
       var accounts = await Supabase.instance.client.from('accounts').select().eq('user_id', userId).eq('name', 'My Wallet');
@@ -127,7 +138,7 @@ class _InitialBalanceScreenState extends State<InitialBalanceScreen> {
                 decoration: BoxDecoration(
                   color: Colors.white,
                   shape: BoxShape.circle,
-                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 20, offset: const Offset(0, 10))],
+                  boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 20, offset: const Offset(0, 10))],
                 ),
                 child: const Icon(Icons.account_balance_wallet_rounded, size: 70, color: Colors.green),
               ),
@@ -148,7 +159,7 @@ class _InitialBalanceScreenState extends State<InitialBalanceScreen> {
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(32),
-                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 20, offset: const Offset(0, 10))],
+                  boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 20, offset: const Offset(0, 10))],
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.center,
@@ -191,7 +202,7 @@ class _InitialBalanceScreenState extends State<InitialBalanceScreen> {
                     foregroundColor: Colors.white,
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
                     elevation: 8,
-                    shadowColor: Colors.green.withValues(alpha: 0.4),
+                    shadowColor: Colors.green.withOpacity(0.4),
                   ),
                   child: _isLoading 
                       ? const CircularProgressIndicator(color: Colors.white) 

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import '../transfers/transfer_screen.dart';
 
 class AccountsScreen extends StatefulWidget {
@@ -14,7 +15,9 @@ class _AccountsScreenState extends State<AccountsScreen> {
   final SupabaseClient _supabase = Supabase.instance.client;
   List<Map<String, dynamic>> _accounts = [];
   Map<String, double> _liveBalances = {};
+  
   bool _isLoading = true;
+  bool _isOffline = false;
 
   @override
   void initState() {
@@ -22,13 +25,21 @@ class _AccountsScreenState extends State<AccountsScreen> {
     _fetchAccountsAndLiveBalances();
   }
 
+  // --- FAST CONCURRENT DATA LOADING WITH OFFLINE PROTECTION ---
   Future<void> _fetchAccountsAndLiveBalances() async {
-    setState(() => _isLoading = true);
+    setState(() { _isLoading = true; _isOffline = false; });
+    
+    // 1. OFFLINE CHECK
+    final connectivityResult = await Connectivity().checkConnectivity();
+    if (connectivityResult.contains(ConnectivityResult.none)) {
+      if (mounted) setState(() { _isLoading = false; _isOffline = true; });
+      return;
+    }
+
     try {
       final userId = _supabase.auth.currentUser?.id;
       if (userId == null) return;
 
-      // PERFORMANCE UPGRADE: Concurrent loading for zero-lag fetching
       final results = await Future.wait<dynamic>([
         _supabase.from('accounts').select('id, name, type').eq('user_id', userId).order('id'),
         _supabase.from('transactions').select('type, amount, account_id').eq('user_id', userId),
@@ -43,12 +54,10 @@ class _AccountsScreenState extends State<AccountsScreen> {
 
       Map<String, double> balances = {};
       
-      // Initialize base balances
       for (var acc in fetchedAccounts) {
         balances[acc['id'].toString()] = 0.0;
       }
 
-      // Add/Subtract Transactions
       for (var tx in txResponse) {
         final acctId = tx['account_id']?.toString();
         if (acctId == null || !balances.containsKey(acctId)) continue;
@@ -63,7 +72,6 @@ class _AccountsScreenState extends State<AccountsScreen> {
         }
       }
 
-      // Add/Subtract Transfers
       for (var tr in transferResponse) {
         final amt = (tr['amount'] as num?)?.toDouble() ?? 0.0;
         final fromId = tr['from_account_id']?.toString();
@@ -77,7 +85,6 @@ class _AccountsScreenState extends State<AccountsScreen> {
         }
       }
 
-      // Deduct active commitments
       for (var c in commitmentsResponse) {
         final amt = (c['amount'] as num?)?.toDouble() ?? 0.0;
         final sourceTx = c['transactions'] as Map<String, dynamic>?;
@@ -97,8 +104,10 @@ class _AccountsScreenState extends State<AccountsScreen> {
         });
       }
     } catch (e) {
-      if (mounted) setState(() => _isLoading = false);
-      debugPrint('Error fetching account management balances: $e');
+      if (mounted) {
+        setState(() => _isLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error fetching accounts: $e'), backgroundColor: Colors.redAccent));
+      }
     }
   }
 
@@ -110,18 +119,26 @@ class _AccountsScreenState extends State<AccountsScreen> {
       backgroundColor: Colors.transparent,
       builder: (ctx) => _AddAccountSheet(
         onSave: (String name, double initialBal, String type) async {
+          final connectivityResult = await Connectivity().checkConnectivity();
+          if (connectivityResult.contains(ConnectivityResult.none)) {
+            if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No internet connection. Cannot create account.'), backgroundColor: Colors.orange));
+            return;
+          }
+
           setState(() => _isLoading = true);
           try {
             final userId = _supabase.auth.currentUser?.id;
-            if (userId == null) return;
+            if (userId == null) throw Exception("User not authenticated");
 
+            // 1. Create Account First
             final newAcc = await _supabase.from('accounts').insert({
               'user_id': userId,
               'name': name,
               'type': type,
-              'current_balance': initialBal, // Fallback schema safety
+              'current_balance': initialBal, 
             }).select().single();
 
+            // 2. Log Initial Balance Transaction if applicable
             if (initialBal > 0) {
               await _supabase.from('transactions').insert({
                 'user_id': userId,
@@ -152,6 +169,29 @@ class _AccountsScreenState extends State<AccountsScreen> {
     );
   }
 
+  // --- OFFLINE UI BUILDER ---
+  Widget _buildOfflineState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.wifi_off_rounded, size: 64, color: Colors.grey.shade400),
+          const SizedBox(height: 16),
+          Text('You are offline', style: TextStyle(color: Colors.grey.shade800, fontSize: 20, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 8),
+          Text('Please check your connection and try again.', style: TextStyle(color: Colors.grey.shade500, fontSize: 14)),
+          const SizedBox(height: 24),
+          ElevatedButton.icon(
+            onPressed: _fetchAccountsAndLiveBalances,
+            icon: const Icon(Icons.refresh_rounded),
+            label: const Text('Retry Connection'),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.deepPurple, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20))),
+          )
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     double totalAllAccounts = _liveBalances.values.fold(0.0, (sum, bal) => sum + bal);
@@ -173,7 +213,7 @@ class _AccountsScreenState extends State<AccountsScreen> {
         foregroundColor: Colors.white,
         elevation: 0,
       ),
-      floatingActionButton: FloatingActionButton.extended(
+      floatingActionButton: _isOffline ? null : FloatingActionButton.extended(
         onPressed: _showNewAccountSheet,
         backgroundColor: Colors.deepPurple,
         foregroundColor: Colors.white,
@@ -181,7 +221,9 @@ class _AccountsScreenState extends State<AccountsScreen> {
         icon: const Icon(Icons.add_rounded),
         label: const Text('New Account', style: TextStyle(fontWeight: FontWeight.bold)),
       ),
-      body: _isLoading
+      body: _isOffline 
+        ? _buildOfflineState()
+        : _isLoading
           ? const Center(child: CircularProgressIndicator(color: Colors.deepPurple))
           : RefreshIndicator(
               onRefresh: _fetchAccountsAndLiveBalances,
@@ -341,7 +383,7 @@ class _AccountsScreenState extends State<AccountsScreen> {
                                 );
                               },
                             ),
-                          const SizedBox(height: 80), // Fab padding
+                          const SizedBox(height: 80), 
                         ],
                       ),
                     ),
@@ -381,10 +423,13 @@ class _AddAccountSheetState extends State<_AddAccountSheet> {
   void _submit() {
     HapticFeedback.lightImpact();
     final name = _nameController.text.trim();
-    final initialBal = double.tryParse(_balanceController.text) ?? 0.0;
+    
+    // FLOATING POINT MATH FIX: Strict 2-decimal truncation
+    final rawBal = double.tryParse(_balanceController.text) ?? 0.0;
+    final initialBal = double.parse(rawBal.toStringAsFixed(2));
     
     if (name.isNotEmpty) {
-      Navigator.pop(context); // Close sheet immediately
+      Navigator.pop(context); 
       widget.onSave(name, initialBal, _selectedType);
     }
   }

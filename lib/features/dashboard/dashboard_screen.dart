@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../core/services/global_state_provider.dart';
 import '../accounts/accounts_screen.dart';
 import '../expenses/expense_entry_screen.dart';
 import '../income/income_entry_screen.dart';
@@ -19,57 +21,39 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
-  bool _isLoading = true;
-
-  String _currencySymbol = '\$';
-  double _netWorth = 0.0;
-  double _walletBalance = 0.0;
-  double _bankBalance = 0.0;
+  // We still track these locally because they are specific to the dashboard view
   double _totalSaved = 0.0;
   double _expenseMTD = 0.0;
   double _pendingTotal = 0.0;
+  bool _isSecondaryLoading = true;
 
   @override
   void initState() {
     super.initState();
-    _fetchDashboardMetrics();
+    // 1. Kick off the Global Provider Fetch
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      context.read<GlobalStateProvider>().loadGlobalData();
+    });
+    // 2. Fetch Dashboard-specific metrics (MTD expenses & commitments)
+    _fetchSecondaryMetrics();
   }
 
-  Future<void> _fetchDashboardMetrics() async {
-    setState(() => _isLoading = true);
+  Future<void> _fetchSecondaryMetrics() async {
     final userId = Supabase.instance.client.auth.currentUser?.id;
     if (userId == null) return;
 
     try {
-      // PERFORMANCE UPGRADE: Concurrent DB calls via Future.wait
-      final results = await Future.wait<dynamic>([
-        Supabase.instance.client.from('profiles').select('currency_symbol').eq('id', userId).maybeSingle(),
-        Supabase.instance.client.from('accounts').select('id, type').eq('user_id', userId),
-        Supabase.instance.client.from('transactions').select('type, amount, account_id').eq('user_id', userId),
+      final results = await Future.wait([
         Supabase.instance.client.from('expenses').select('amount, date').eq('user_id', userId),
-        Supabase.instance.client.from('transfers').select('from_account_id, to_account_id, amount').eq('user_id', userId),
-        Supabase.instance.client.from('commitments').select('amount, status, transactions(account_id)').eq('user_id', userId),
+        Supabase.instance.client.from('commitments').select('amount, status').eq('user_id', userId),
       ]);
 
-      final profileData = results[0] as Map<String, dynamic>?;
-      final accountsData = (results[1] as List<dynamic>?) ?? [];
-      final txData = (results[2] as List<dynamic>?) ?? [];
-      final expensesData = (results[3] as List<dynamic>?) ?? [];
-      final transferData = (results[4] as List<dynamic>?) ?? [];
-      final commitmentsData = (results[5] as List<dynamic>?) ?? [];
+      final expensesData = (results[0] as List<dynamic>?) ?? [];
+      final commitmentsData = (results[1] as List<dynamic>?) ?? [];
 
-      final symbol = profileData?['currency_symbol']?.toString() ?? '\$';
-
-      final Map<String, String> accountTypes = {
-        for (var item in accountsData) item['id'].toString(): (item['type'] ?? 'wallet').toString()
-      };
-
-      double incomeWallet = 0, expenseWallet = 0;
-      double incomeBank = 0, expenseBank = 0;
       double mtdExpense = 0;
       final now = DateTime.now();
 
-      // MTD Expenses
       for (var exp in expensesData) {
         final amt = (exp['amount'] as num?)?.toDouble() ?? 0.0;
         final dateStr = exp['date']?.toString();
@@ -81,35 +65,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }
       }
 
-      // Transactions Aggregation
-      for (var tx in txData) {
-        final amt = (tx['amount'] as num?)?.toDouble() ?? 0.0;
-        final acctId = tx['account_id']?.toString() ?? '';
-        final acctType = accountTypes[acctId] ?? 'wallet';
-        final type = tx['type']?.toString();
-
-        if (type == 'income' || type == 'initial_balance') {
-          if (acctType == 'wallet') incomeWallet += amt;
-          if (acctType == 'bank') incomeBank += amt;
-        } else if (type == 'expense') {
-          if (acctType == 'wallet') expenseWallet += amt;
-          if (acctType == 'bank') expenseBank += amt;
-        }
-      }
-
-      // Transfers
-      for (var tr in transferData) {
-        final amt = (tr['amount'] as num?)?.toDouble() ?? 0.0;
-        final fromType = accountTypes[tr['from_account_id']?.toString() ?? ''];
-        final toType = accountTypes[tr['to_account_id']?.toString() ?? ''];
-
-        if (fromType == 'wallet') incomeWallet -= amt;
-        if (fromType == 'bank') incomeBank -= amt;
-        if (toType == 'wallet') incomeWallet += amt;
-        if (toType == 'bank') incomeBank += amt;
-      }
-
-      // Savings Commits
       double totalSaved = 0;
       double pending = 0;
       for (var s in commitmentsData) {
@@ -118,38 +73,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
         
         if (status == 'deposited') {
           totalSaved += amt;
-          final sourceTx = s['transactions'] as Map<String, dynamic>?;
-          if (sourceTx != null && sourceTx['account_id'] != null) {
-            final acctType = accountTypes[sourceTx['account_id'].toString()];
-            if (acctType == 'wallet') incomeWallet -= amt;
-            else if (acctType == 'bank') incomeBank -= amt;
-          }
         } else if (status == 'pending') {
           pending += amt;
         }
       }
 
-      // STRICT OVERRIDE: Force Dashboard to use the live ledger math
-      final calculatedWallet = incomeWallet - expenseWallet;
-      final calculatedBank = incomeBank - expenseBank;
-
       if (mounted) {
         setState(() {
-          _currencySymbol = symbol;
-          _walletBalance = calculatedWallet;
-          _bankBalance = calculatedBank;
-          _netWorth = _walletBalance + _bankBalance + totalSaved;
+          _expenseMTD = mtdExpense;
           _totalSaved = totalSaved;
           _pendingTotal = pending;
-          _expenseMTD = mtdExpense;
-          _isLoading = false;
+          _isSecondaryLoading = false;
         });
       }
     } catch (e) {
-      if (mounted) {
-        setState(() => _isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Dashboard Sync Error: $e'), backgroundColor: Colors.redAccent));
-      }
+      if (mounted) setState(() => _isSecondaryLoading = false);
     }
   }
 
@@ -157,14 +95,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
     HapticFeedback.mediumImpact();
     await Supabase.instance.client.auth.signOut();
     if (mounted) {
-      Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => const LoginScreen()));
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const LoginScreen()),
+        (route) => false,
+      );
     }
   }
 
   void _navigateTo(Widget screen) {
     HapticFeedback.lightImpact();
-    Navigator.push(context, MaterialPageRoute(builder: (_) => screen))
-        .then((_) => _fetchDashboardMetrics());
+    Navigator.push(context, MaterialPageRoute(builder: (_) => screen)).then((_) {
+      // THE MAGIC: When you return from any screen, tell the Provider to refresh the global memory!
+      context.read<GlobalStateProvider>().loadGlobalData();
+      _fetchSecondaryMetrics();
+    });
   }
 
   Widget _buildQuickActionButton({required IconData icon, required String label, required VoidCallback onTap}) {
@@ -241,12 +185,29 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // 1. Hook into the Global State
+    final globalState = context.watch<GlobalStateProvider>();
+    
+    // 2. Compute dynamic balances purely from the secure global state
+    double walletBalance = 0;
+    double bankBalance = 0;
+    
+    for (var acc in globalState.accounts) {
+      if (acc['type'] == 'wallet') walletBalance += (acc['current_balance'] as num).toDouble();
+      if (acc['type'] == 'bank') bankBalance += (acc['current_balance'] as num).toDouble();
+    }
+    
+    final double netWorth = walletBalance + bankBalance + _totalSaved;
+
     return Scaffold(
       backgroundColor: const Color(0xFFF8F9FE),
-      body: _isLoading
+      body: (globalState.isLoading && _isSecondaryLoading)
           ? const Center(child: CircularProgressIndicator(color: Colors.deepPurple))
           : RefreshIndicator(
-              onRefresh: _fetchDashboardMetrics,
+              onRefresh: () async {
+                await context.read<GlobalStateProvider>().loadGlobalData();
+                await _fetchSecondaryMetrics();
+              },
               color: Colors.deepPurple,
               child: CustomScrollView(
                 physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
@@ -271,10 +232,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           child: Column(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
+                              if (globalState.isOffline)
+                                Container(
+                                  margin: const EdgeInsets.only(bottom: 12),
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                                  decoration: BoxDecoration(color: Colors.orange, borderRadius: BorderRadius.circular(12)),
+                                  child: const Text('OFFLINE MODE', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
+                                ),
                               const Text('TOTAL NET WORTH', style: TextStyle(color: Colors.white70, fontSize: 13, letterSpacing: 1.5, fontWeight: FontWeight.w600)),
                               const SizedBox(height: 8),
                               Text(
-                                '$_currencySymbol${_netWorth.toStringAsFixed(2)}',
+                                '${globalState.currencySymbol}${netWorth.toStringAsFixed(2)}',
                                 style: const TextStyle(color: Colors.white, fontSize: 44, fontWeight: FontWeight.bold, letterSpacing: -1),
                               ),
                               const SizedBox(height: 35),
@@ -308,7 +276,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             children: [
                               _buildFlatCard(
                                 title: 'Wallet Cash',
-                                amount: '$_currencySymbol${_walletBalance.toStringAsFixed(2)}',
+                                amount: '${globalState.currencySymbol}${walletBalance.toStringAsFixed(2)}',
                                 icon: Icons.account_balance_wallet_rounded,
                                 iconColor: Colors.green,
                                 onTap: () => _navigateTo(const AccountsScreen()),
@@ -316,7 +284,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               const SizedBox(width: 16),
                               _buildFlatCard(
                                 title: 'Bank Accounts',
-                                amount: '$_currencySymbol${_bankBalance.toStringAsFixed(2)}',
+                                amount: '${globalState.currencySymbol}${bankBalance.toStringAsFixed(2)}',
                                 icon: Icons.account_balance_rounded,
                                 iconColor: Colors.blue,
                                 onTap: () => _navigateTo(const AccountsScreen()),
@@ -330,7 +298,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                             children: [
                               _buildFlatCard(
                                 title: 'Total Saved',
-                                amount: '$_currencySymbol${_totalSaved.toStringAsFixed(0)}',
+                                amount: '${globalState.currencySymbol}${_totalSaved.toStringAsFixed(0)}',
                                 icon: Icons.shield_rounded,
                                 iconColor: Colors.teal,
                                 onTap: () => _navigateTo(const CommitmentHubScreen()),
@@ -338,7 +306,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                               const SizedBox(width: 16),
                               _buildFlatCard(
                                 title: 'Spent (MTD)',
-                                amount: '$_currencySymbol${_expenseMTD.toStringAsFixed(0)}',
+                                amount: '${globalState.currencySymbol}${_expenseMTD.toStringAsFixed(0)}',
                                 icon: Icons.trending_down_rounded,
                                 iconColor: Colors.redAccent,
                                 onTap: () {},
@@ -350,7 +318,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                           const SizedBox(height: 12),
                           _buildListTile(
                             title: 'Commitment Hub',
-                            subtitle: _pendingTotal > 0 ? 'Action Required: $_currencySymbol${_pendingTotal.toStringAsFixed(2)}' : 'All caught up!',
+                            subtitle: _pendingTotal > 0 ? 'Action Required: ${globalState.currencySymbol}${_pendingTotal.toStringAsFixed(2)}' : 'All caught up!',
                             icon: Icons.savings_rounded,
                             color: Colors.orange,
                             onTap: () => _navigateTo(const CommitmentHubScreen()),
