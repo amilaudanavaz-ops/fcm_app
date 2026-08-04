@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../dashboard/dashboard_screen.dart';
 import '../initial_setup/initial_balance_screen.dart';
@@ -14,6 +15,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   bool _isLoading = false;
+  bool _obscurePassword = true;
 
   Future<void> _routeUser() async {
     final userId = Supabase.instance.client.auth.currentUser?.id;
@@ -43,6 +45,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   // 1. Sign Up Logic
   Future<void> _signUp() async {
+    HapticFeedback.mediumImpact();
     setState(() => _isLoading = true);
     try {
       final res = await Supabase.instance.client.auth.signUp(
@@ -51,18 +54,17 @@ class _LoginScreenState extends State<LoginScreen> {
       );
       
       if (res.user != null) {
-        // Wait a brief moment for auth state to settle, then route
         await Future.delayed(const Duration(milliseconds: 500));
         await _routeUser();
       } else if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Account Created! Please Sign In.')),
+          const SnackBar(content: Text('Account Created! Please Sign In.'), backgroundColor: Colors.green),
         );
       }
     } on AuthException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.message), backgroundColor: Colors.red),
+          SnackBar(content: Text(e.message), backgroundColor: Colors.redAccent),
         );
       }
     } finally {
@@ -72,6 +74,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   // 2. Sign In Logic
   Future<void> _signIn() async {
+    HapticFeedback.mediumImpact();
     setState(() => _isLoading = true);
     try {
       await Supabase.instance.client.auth.signInWithPassword(
@@ -83,7 +86,7 @@ class _LoginScreenState extends State<LoginScreen> {
     } on AuthException catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.message), backgroundColor: Colors.red),
+          SnackBar(content: Text(e.message), backgroundColor: Colors.redAccent),
         );
       }
     } finally {
@@ -94,48 +97,175 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Icon(Icons.lock_outline, size: 80, color: Colors.blue),
-              const SizedBox(height: 20),
-              const Text('FCM Login', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 40),
-              
-              TextField(
-                controller: _emailController,
-                decoration: const InputDecoration(labelText: 'Email', border: OutlineInputBorder()),
-                keyboardType: TextInputType.emailAddress,
-              ),
-              const SizedBox(height: 15),
-              TextField(
-                controller: _passwordController,
-                decoration: const InputDecoration(labelText: 'Password', border: OutlineInputBorder()),
-                obscureText: true,
-              ),
-              const SizedBox(height: 25),
-              
-              if (_isLoading)
-                const CircularProgressIndicator()
-              else
-                Column(
-                  children: [
-                    ElevatedButton(
-                      onPressed: _signIn,
-                      style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 50)),
-                      child: const Text('Sign In'),
-                    ),
-                    const SizedBox(height: 10),
-                    TextButton(
-                      onPressed: _signUp,
-                      child: const Text('Create Account'),
-                    ),
-                  ],
+      body: Container(
+        width: double.infinity,
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            colors: [Color(0xFF2E0854), Color(0xFF5D12D6)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        child: SafeArea(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              return SingleChildScrollView(
+                // Clip.none allows the hidden watermark to render outside the normal scroll bounds
+                clipBehavior: Clip.none,
+                // AlwaysScrollable ensures the bounce effect works even if content doesn't exceed screen height
+                physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    minHeight: constraints.maxHeight, // Fills the screen height
+                  ),
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    alignment: Alignment.center,
+                    children: [
+                      
+                      // --- MAIN CONTENT ---
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 40),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            // --- LOGO / BRANDING ---
+                            Image.asset(
+                              'assets/icon.png', // Directly rendering the transparent icon
+                              width: 140, // Scaled up slightly since the text is gone
+                              height: 140,
+                              fit: BoxFit.contain, // Ensures the edges aren't cropped
+                            ),
+                            const SizedBox(height: 24),
+                            Text('Manage your wealth seamlessly', style: TextStyle(fontSize: 15, color: Colors.white.withValues(alpha: 0.7), fontWeight: FontWeight.w500)),
+                            const SizedBox(height: 40),
+                            
+                            // --- LOGIN CARD ---
+                            Container(
+                              padding: const EdgeInsets.all(24),
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                borderRadius: BorderRadius.circular(32),
+                                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.2), blurRadius: 30, offset: const Offset(0, 10))],
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Text('Welcome Back', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: Colors.black87)),
+                                  const SizedBox(height: 24),
+                                  
+                                  // Email Field
+                                  TextField(
+                                    controller: _emailController,
+                                    keyboardType: TextInputType.emailAddress,
+                                    textInputAction: TextInputAction.next,
+                                    style: const TextStyle(fontWeight: FontWeight.w600),
+                                    decoration: InputDecoration(
+                                      labelText: 'Email Address',
+                                      labelStyle: const TextStyle(color: Colors.grey, fontWeight: FontWeight.w600),
+                                      prefixIcon: const Icon(Icons.email_rounded, color: Colors.deepPurple),
+                                      filled: true,
+                                      fillColor: Colors.grey.shade50,
+                                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 16),
+                                  
+                                  // Password Field
+                                  TextField(
+                                    controller: _passwordController,
+                                    obscureText: _obscurePassword,
+                                    textInputAction: TextInputAction.done,
+                                    onSubmitted: (_) => _signIn(),
+                                    style: const TextStyle(fontWeight: FontWeight.w600),
+                                    decoration: InputDecoration(
+                                      labelText: 'Password',
+                                      labelStyle: const TextStyle(color: Colors.grey, fontWeight: FontWeight.w600),
+                                      prefixIcon: const Icon(Icons.lock_rounded, color: Colors.deepPurple),
+                                      suffixIcon: IconButton(
+                                        icon: Icon(_obscurePassword ? Icons.visibility_rounded : Icons.visibility_off_rounded, color: Colors.grey),
+                                        onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+                                      ),
+                                      filled: true,
+                                      fillColor: Colors.grey.shade50,
+                                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 32),
+                                  
+                                  // Buttons
+                                  if (_isLoading)
+                                    const Center(child: CircularProgressIndicator(color: Colors.deepPurple))
+                                  else
+                                    Column(
+                                      children: [
+                                        SizedBox(
+                                          width: double.infinity,
+                                          height: 55,
+                                          child: ElevatedButton(
+                                            onPressed: _signIn,
+                                            style: ElevatedButton.styleFrom(
+                                              backgroundColor: Colors.deepPurple,
+                                              foregroundColor: Colors.white,
+                                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                                              elevation: 4,
+                                              shadowColor: Colors.deepPurple.withValues(alpha: 0.3),
+                                            ),
+                                            child: const Text('Sign In', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, letterSpacing: 0.5)),
+                                          ),
+                                        ),
+                                        const SizedBox(height: 16),
+                                        SizedBox(
+                                          width: double.infinity,
+                                          height: 55,
+                                          child: TextButton(
+                                            onPressed: _signUp,
+                                            style: TextButton.styleFrom(
+                                              foregroundColor: Colors.deepPurple,
+                                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                                            ),
+                                            child: const Text('Create New Account', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      
+                      // --- HIDDEN OVERSCROLL WATERMARK ---
+                      // Positioned negatively at the bottom. Only visible when dragging up (overscroll).
+                      Positioned(
+                        bottom: -60,
+                        left: 0,
+                        right: 0,
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.code_rounded, size: 16, color: Colors.white.withValues(alpha: 0.5)),
+                            const SizedBox(width: 8),
+                            Text(
+                              'Developed by DDREXAR',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                                color: Colors.white.withValues(alpha: 0.5),
+                                letterSpacing: 1.2,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+
+                    ],
+                  ),
                 ),
-            ],
+              );
+            },
           ),
         ),
       ),

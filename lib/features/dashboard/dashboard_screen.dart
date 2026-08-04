@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../accounts/accounts_screen.dart';
 import '../expenses/expense_entry_screen.dart';
 import '../income/income_entry_screen.dart';
+import '../transfers/transfer_screen.dart';
 import '../reports/reports_screen.dart';
 import '../savings/commitment_hub_screen.dart';
 import '../settings/settings_screen.dart';
@@ -17,8 +19,6 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
-  final PageController _pageController = PageController();
-  int _currentPage = 0;
   bool _isLoading = true;
 
   String _currencySymbol = '\$';
@@ -35,31 +35,34 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _fetchDashboardMetrics();
   }
 
-  @override
-  void dispose() {
-    _pageController.dispose();
-    super.dispose();
-  }
-
   Future<void> _fetchDashboardMetrics() async {
     setState(() => _isLoading = true);
     final userId = Supabase.instance.client.auth.currentUser?.id;
     if (userId == null) return;
 
     try {
-      final profileData = await Supabase.instance.client.from('profiles').select().eq('id', userId).maybeSingle();
+      // PERFORMANCE UPGRADE: Concurrent DB calls via Future.wait
+      final results = await Future.wait<dynamic>([
+        Supabase.instance.client.from('profiles').select('currency_symbol').eq('id', userId).maybeSingle(),
+        Supabase.instance.client.from('accounts').select('id, type').eq('user_id', userId),
+        Supabase.instance.client.from('transactions').select('type, amount, account_id').eq('user_id', userId),
+        Supabase.instance.client.from('expenses').select('amount, date').eq('user_id', userId),
+        Supabase.instance.client.from('transfers').select('from_account_id, to_account_id, amount').eq('user_id', userId),
+        Supabase.instance.client.from('commitments').select('amount, status, transactions(account_id)').eq('user_id', userId),
+      ]);
+
+      final profileData = results[0] as Map<String, dynamic>?;
+      final accountsData = (results[1] as List<dynamic>?) ?? [];
+      final txData = (results[2] as List<dynamic>?) ?? [];
+      final expensesData = (results[3] as List<dynamic>?) ?? [];
+      final transferData = (results[4] as List<dynamic>?) ?? [];
+      final commitmentsData = (results[5] as List<dynamic>?) ?? [];
+
       final symbol = profileData?['currency_symbol']?.toString() ?? '\$';
 
-      final accountsData = await Supabase.instance.client.from('accounts').select().eq('user_id', userId);
       final Map<String, String> accountTypes = {
         for (var item in accountsData) item['id'].toString(): (item['type'] ?? 'wallet').toString()
       };
-
-      final txData = await Supabase.instance.client.from('transactions').select().eq('user_id', userId);
-      final expensesData = await Supabase.instance.client.from('expenses').select().eq('user_id', userId);
-      final transferData = await Supabase.instance.client.from('transfers').select().eq('user_id', userId);
-      final savedData = await Supabase.instance.client.from('commitments').select('amount, transactions(account_id)').eq('user_id', userId).eq('status', 'deposited');
-      final pendingData = await Supabase.instance.client.from('commitments').select().eq('user_id', userId).eq('status', 'pending');
 
       double incomeWallet = 0, expenseWallet = 0;
       double incomeBank = 0, expenseBank = 0;
@@ -72,15 +75,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
         final dateStr = exp['date']?.toString();
         if (dateStr != null) {
           final date = DateTime.tryParse(dateStr) ?? now;
-          if (date.year == now.year && date.month == now.month) mtdExpense += amt;
+          if (date.year == now.year && date.month == now.month) {
+            mtdExpense += amt;
+          }
         }
       }
 
-      // Live Transactions Aggregation
+      // Transactions Aggregation
       for (var tx in txData) {
         final amt = (tx['amount'] as num?)?.toDouble() ?? 0.0;
         final acctId = tx['account_id']?.toString() ?? '';
-        final acctType = accountTypes[acctId] ?? 'wallet'; // Default to wallet if orphaned
+        final acctType = accountTypes[acctId] ?? 'wallet';
         final type = tx['type']?.toString();
 
         if (type == 'income' || type == 'initial_balance') {
@@ -106,25 +111,33 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
       // Savings Commits
       double totalSaved = 0;
-      for (var s in savedData) {
+      double pending = 0;
+      for (var s in commitmentsData) {
         final amt = (s['amount'] as num?)?.toDouble() ?? 0.0;
-        totalSaved += amt;
-        final sourceTx = s['transactions'] as Map<String, dynamic>?;
-        if (sourceTx != null && sourceTx['account_id'] != null) {
-          final acctType = accountTypes[sourceTx['account_id'].toString()];
-          if (acctType == 'wallet') incomeWallet -= amt;
-          else if (acctType == 'bank') incomeBank -= amt;
+        final status = s['status']?.toString();
+        
+        if (status == 'deposited') {
+          totalSaved += amt;
+          final sourceTx = s['transactions'] as Map<String, dynamic>?;
+          if (sourceTx != null && sourceTx['account_id'] != null) {
+            final acctType = accountTypes[sourceTx['account_id'].toString()];
+            if (acctType == 'wallet') incomeWallet -= amt;
+            else if (acctType == 'bank') incomeBank -= amt;
+          }
+        } else if (status == 'pending') {
+          pending += amt;
         }
       }
 
-      double pending = 0;
-      for (var p in pendingData) pending += (p['amount'] as num?)?.toDouble() ?? 0.0;
+      // STRICT OVERRIDE: Force Dashboard to use the live ledger math
+      final calculatedWallet = incomeWallet - expenseWallet;
+      final calculatedBank = incomeBank - expenseBank;
 
       if (mounted) {
         setState(() {
           _currencySymbol = symbol;
-          _walletBalance = incomeWallet - expenseWallet;
-          _bankBalance = incomeBank - expenseBank;
+          _walletBalance = calculatedWallet;
+          _bankBalance = calculatedBank;
           _netWorth = _walletBalance + _bankBalance + totalSaved;
           _totalSaved = totalSaved;
           _pendingTotal = pending;
@@ -133,75 +146,95 @@ class _DashboardScreenState extends State<DashboardScreen> {
         });
       }
     } catch (e) {
-      if (mounted) setState(() => _isLoading = false);
-      debugPrint('Error fetching dashboard metrics: $e');
-    }
-  }
-  
-  Future<void> _logout() async {
-    await Supabase.instance.client.auth.signOut();
-    if (mounted) {
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => const LoginScreen()),
-      );
+      if (mounted) {
+        setState(() => _isLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Dashboard Sync Error: $e'), backgroundColor: Colors.redAccent));
+      }
     }
   }
 
-  Widget _buildTopCard(String title, double amount, IconData icon, Color color) {
-    return InkWell(
-      onTap: () {
-        Navigator.push(
-          context,
-          MaterialPageRoute(builder: (_) => const AccountsScreen()),
-        ).then((_) => _fetchDashboardMetrics());
-      },
-      child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 16),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(24),
-          boxShadow: const [
-            BoxShadow(color: Colors.black12, blurRadius: 10, offset: Offset(0, 4))
-          ],
+  Future<void> _logout() async {
+    HapticFeedback.mediumImpact();
+    await Supabase.instance.client.auth.signOut();
+    if (mounted) {
+      Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => const LoginScreen()));
+    }
+  }
+
+  void _navigateTo(Widget screen) {
+    HapticFeedback.lightImpact();
+    Navigator.push(context, MaterialPageRoute(builder: (_) => screen))
+        .then((_) => _fetchDashboardMetrics());
+  }
+
+  Widget _buildQuickActionButton({required IconData icon, required String label, required VoidCallback onTap}) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Column(
+        children: [
+          Container(
+            height: 54,
+            width: 54,
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.15),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, color: Colors.white, size: 26),
+          ),
+          const SizedBox(height: 8),
+          Text(label, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w500, fontSize: 13)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFlatCard({required String title, required String amount, required IconData icon, required Color iconColor, required VoidCallback onTap}) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: Colors.grey.shade100, width: 1.5),
+            boxShadow: [BoxShadow(color: Colors.grey.shade200, blurRadius: 12, offset: const Offset(0, 6))],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              CircleAvatar(backgroundColor: iconColor.withOpacity(0.1), radius: 18, child: Icon(icon, color: iconColor, size: 20)),
+              const SizedBox(height: 12),
+              Text(title, style: TextStyle(color: Colors.grey.shade600, fontSize: 13, fontWeight: FontWeight.w600)),
+              const SizedBox(height: 4),
+              Text(amount, style: const TextStyle(color: Colors.black87, fontSize: 18, fontWeight: FontWeight.w800)),
+            ],
+          ),
         ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            CircleAvatar(
-              backgroundColor: color.withValues(alpha: 0.15),
-              radius: 24,
-              child: Icon(icon, color: color, size: 28),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              title.toUpperCase(),
-              style: const TextStyle(
-                color: Colors.grey,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 1.2,
-                fontSize: 12,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '$_currencySymbol${amount.toStringAsFixed(2)}',
-              style: const TextStyle(
-                fontSize: 32,
-                fontWeight: FontWeight.bold,
-                color: Colors.black87,
-              ),
-            ),
-            const SizedBox(height: 12),
-            const Text(
-              'Tap to manage',
-              style: TextStyle(
-                color: Colors.deepPurpleAccent,
-                fontWeight: FontWeight.bold,
-                fontSize: 13,
-              ),
-            ),
-          ],
+      ),
+    );
+  }
+
+  Widget _buildListTile({required String title, required String subtitle, required IconData icon, required Color color, required VoidCallback onTap}) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.grey.shade100, width: 1.5),
+        boxShadow: [BoxShadow(color: Colors.grey.shade100, blurRadius: 10, offset: const Offset(0, 4))],
+      ),
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+        leading: Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(color: color.withOpacity(0.1), borderRadius: BorderRadius.circular(12)),
+          child: Icon(icon, color: color),
         ),
+        title: Text(title, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15)),
+        subtitle: Text(subtitle, style: TextStyle(color: subtitle.contains('Required') ? Colors.redAccent : Colors.grey.shade500, fontSize: 13)),
+        trailing: const Icon(Icons.arrow_forward_ios_rounded, color: Colors.grey, size: 16),
+        onTap: onTap,
       ),
     );
   }
@@ -209,224 +242,134 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.grey[50],
-      appBar: AppBar(
-        backgroundColor: Colors.deepPurple,
-        elevation: 0,
-        title: const Text('Dashboard', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-        centerTitle: true,
-        iconTheme: const IconThemeData(color: Colors.white),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.settings),
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const SettingsScreen()),
-            ).then((_) => _fetchDashboardMetrics()),
-          ),
-          IconButton(
-            icon: const Icon(Icons.logout),
-            onPressed: _logout,
-          ),
-        ],
-      ),
+      backgroundColor: const Color(0xFFF8F9FE),
       body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
+          ? const Center(child: CircularProgressIndicator(color: Colors.deepPurple))
           : RefreshIndicator(
               onRefresh: _fetchDashboardMetrics,
-              child: SingleChildScrollView(
-                physics: const AlwaysScrollableScrollPhysics(),
-                child: Column(
-                  children: [
-                    // Purple Background Header + PageView
-                    Stack(
-                      children: [
-                        Container(
-                          height: 120,
-                          decoration: const BoxDecoration(
-                            color: Colors.deepPurple,
-                            borderRadius: BorderRadius.only(
-                              bottomLeft: Radius.circular(32),
-                              bottomRight: Radius.circular(32),
-                            ),
+              color: Colors.deepPurple,
+              child: CustomScrollView(
+                physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
+                slivers: [
+                  SliverAppBar(
+                    expandedHeight: 310.0,
+                    floating: false,
+                    pinned: true,
+                    backgroundColor: Colors.transparent,
+                    elevation: 0,
+                    flexibleSpace: FlexibleSpaceBar(
+                      background: Container(
+                        decoration: const BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [Color(0xFF2E0854), Color(0xFF5D12D6)],
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
                           ),
+                          borderRadius: BorderRadius.only(bottomLeft: Radius.circular(40), bottomRight: Radius.circular(40)),
                         ),
-                        Column(
-                          children: [
-                            const SizedBox(height: 20),
-                            SizedBox(
-                              height: 200,
-                              child: PageView(
-                                controller: _pageController,
-                                onPageChanged: (index) => setState(() => _currentPage = index),
+                        child: SafeArea(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              const Text('TOTAL NET WORTH', style: TextStyle(color: Colors.white70, fontSize: 13, letterSpacing: 1.5, fontWeight: FontWeight.w600)),
+                              const SizedBox(height: 8),
+                              Text(
+                                '$_currencySymbol${_netWorth.toStringAsFixed(2)}',
+                                style: const TextStyle(color: Colors.white, fontSize: 44, fontWeight: FontWeight.bold, letterSpacing: -1),
+                              ),
+                              const SizedBox(height: 35),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                                 children: [
-                                  _buildTopCard('Net Worth', _netWorth, Icons.monetization_on, Colors.blue),
-                                  _buildTopCard('Wallet Cash', _walletBalance, Icons.account_balance_wallet, Colors.green),
-                                  _buildTopCard('Bank Accounts', _bankBalance, Icons.account_balance, Colors.indigo),
+                                  _buildQuickActionButton(icon: Icons.add, label: 'Income', onTap: () => _navigateTo(const IncomeEntryScreen())),
+                                  _buildQuickActionButton(icon: Icons.remove, label: 'Expense', onTap: () => _navigateTo(const ExpenseEntryScreen())),
+                                  _buildQuickActionButton(icon: Icons.swap_horiz, label: 'Transfer', onTap: () => _navigateTo(const TransferScreen())),
                                 ],
-                              ),
-                            ),
-                            const SizedBox(height: 16),
-                            // Page Indicators
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: List.generate(3, (index) {
-                                return AnimatedContainer(
-                                  duration: const Duration(milliseconds: 300),
-                                  margin: const EdgeInsets.symmetric(horizontal: 4),
-                                  height: 8,
-                                  width: _currentPage == index ? 24 : 8,
-                                  decoration: BoxDecoration(
-                                    color: _currentPage == index ? Colors.deepPurple : Colors.grey.shade300,
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                );
-                              }),
-                            ),
-                          ],
+                              )
+                            ],
+                          ),
                         ),
-                      ],
+                      ),
                     ),
-
-                    const SizedBox(height: 20),
-
-                    // MTD & Saved Summary Row
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Row(
+                    actions: [
+                      IconButton(icon: const Icon(Icons.settings_outlined, color: Colors.white), onPressed: () => _navigateTo(const SettingsScreen())),
+                      IconButton(icon: const Icon(Icons.logout_rounded, color: Colors.white70), onPressed: _logout),
+                    ],
+                  ),
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.all(20.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Expanded(
-                            child: Card(
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                              elevation: 0,
-                              child: Padding(
-                                padding: const EdgeInsets.all(20),
-                                child: Column(
-                                  children: [
-                                    const Text('Total Saved', style: TextStyle(color: Colors.grey)),
-                                    const SizedBox(height: 8),
-                                    Text(
-                                      '$_currencySymbol${_totalSaved.toStringAsFixed(0)}',
-                                      style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.green),
-                                    ),
-                                  ],
-                                ),
+                          const Text('Accounts', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Colors.black87)),
+                          const SizedBox(height: 12),
+                          Row(
+                            children: [
+                              _buildFlatCard(
+                                title: 'Wallet Cash',
+                                amount: '$_currencySymbol${_walletBalance.toStringAsFixed(2)}',
+                                icon: Icons.account_balance_wallet_rounded,
+                                iconColor: Colors.green,
+                                onTap: () => _navigateTo(const AccountsScreen()),
                               ),
-                            ),
-                          ),
-                          const SizedBox(width: 16),
-                          Expanded(
-                            child: Card(
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                              elevation: 0,
-                              child: Padding(
-                                padding: const EdgeInsets.all(20),
-                                child: Column(
-                                  children: [
-                                    const Text('Expense (MTD)', style: TextStyle(color: Colors.grey)),
-                                    const SizedBox(height: 8),
-                                    Text(
-                                      '$_currencySymbol${_expenseMTD.toStringAsFixed(0)}',
-                                      style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.red),
-                                    ),
-                                  ],
-                                ),
+                              const SizedBox(width: 16),
+                              _buildFlatCard(
+                                title: 'Bank Accounts',
+                                amount: '$_currencySymbol${_bankBalance.toStringAsFixed(2)}',
+                                icon: Icons.account_balance_rounded,
+                                iconColor: Colors.blue,
+                                onTap: () => _navigateTo(const AccountsScreen()),
                               ),
-                            ),
+                            ],
                           ),
+                          const SizedBox(height: 24),
+                          const Text('Overview', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Colors.black87)),
+                          const SizedBox(height: 12),
+                          Row(
+                            children: [
+                              _buildFlatCard(
+                                title: 'Total Saved',
+                                amount: '$_currencySymbol${_totalSaved.toStringAsFixed(0)}',
+                                icon: Icons.shield_rounded,
+                                iconColor: Colors.teal,
+                                onTap: () => _navigateTo(const CommitmentHubScreen()),
+                              ),
+                              const SizedBox(width: 16),
+                              _buildFlatCard(
+                                title: 'Spent (MTD)',
+                                amount: '$_currencySymbol${_expenseMTD.toStringAsFixed(0)}',
+                                icon: Icons.trending_down_rounded,
+                                iconColor: Colors.redAccent,
+                                onTap: () {},
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 24),
+                          const Text('Quick Hub', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Colors.black87)),
+                          const SizedBox(height: 12),
+                          _buildListTile(
+                            title: 'Commitment Hub',
+                            subtitle: _pendingTotal > 0 ? 'Action Required: $_currencySymbol${_pendingTotal.toStringAsFixed(2)}' : 'All caught up!',
+                            icon: Icons.savings_rounded,
+                            color: Colors.orange,
+                            onTap: () => _navigateTo(const CommitmentHubScreen()),
+                          ),
+                          _buildListTile(
+                            title: 'View Reports',
+                            subtitle: 'Analytics & History',
+                            icon: Icons.bar_chart_rounded,
+                            color: Colors.deepPurple,
+                            onTap: () => _navigateTo(const ReportsScreen()),
+                          ),
+                          const SizedBox(height: 40),
                         ],
                       ),
                     ),
-
-                    const SizedBox(height: 16),
-
-                    // Hub & Reports Links
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Card(
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                        elevation: 0,
-                        child: ListTile(
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                          leading: CircleAvatar(
-                            backgroundColor: Colors.orange.shade50,
-                            child: const Icon(Icons.savings_outlined, color: Colors.orange),
-                          ),
-                          title: const Text('Commitment Hub', style: TextStyle(fontWeight: FontWeight.bold)),
-                          subtitle: Text(
-                            _pendingTotal > 0 ? 'Action Required: $_currencySymbol${_pendingTotal.toStringAsFixed(2)}' : 'All caught up!',
-                            style: TextStyle(color: _pendingTotal > 0 ? Colors.redAccent : Colors.grey),
-                          ),
-                          trailing: const Icon(Icons.chevron_right, color: Colors.grey),
-                          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const CommitmentHubScreen())).then((_) => _fetchDashboardMetrics()),
-                        ),
-                      ),
-                    ),
-
-                    const SizedBox(height: 12),
-
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Card(
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                        elevation: 0,
-                        child: ListTile(
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                          leading: CircleAvatar(
-                            backgroundColor: Colors.deepPurple.shade50,
-                            child: const Icon(Icons.bar_chart, color: Colors.deepPurple),
-                          ),
-                          title: const Text('View Reports', style: TextStyle(fontWeight: FontWeight.bold)),
-                          subtitle: const Text('Analytics & History', style: TextStyle(color: Colors.grey)),
-                          trailing: const Icon(Icons.chevron_right, color: Colors.grey),
-                          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ReportsScreen())).then((_) => _fetchDashboardMetrics()),
-                        ),
-                      ),
-                    ),
-
-                    const SizedBox(height: 100), // padding for bottom buttons
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
-      // Floating Bottom Action Buttons
-      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
-      floatingActionButton: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-        child: Row(
-          children: [
-            Expanded(
-              child: ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.red.shade600,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  elevation: 4,
-                ),
-                onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ExpenseEntryScreen())).then((_) => _fetchDashboardMetrics()),
-                icon: const Icon(Icons.remove),
-                label: const Text('Expense', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-              ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.green.shade600,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  elevation: 4,
-                ),
-                onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const IncomeEntryScreen())).then((_) => _fetchDashboardMetrics()),
-                icon: const Icon(Icons.add),
-                label: const Text('Income', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-              ),
-            ),
-          ],
-        ),
-      ),
     );
   }
 }

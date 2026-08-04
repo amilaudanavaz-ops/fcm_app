@@ -38,9 +38,13 @@ class CategoryService {
     return CategoryModel.fromJson(response);
   }
 
-  /// Delete a category by ID
+  /// Delete a category by ID (Handles both int and UUID formats safely)
   Future<void> deleteCategory(String id) async {
-    final parsedId = int.tryParse(id) ?? id;
-    await _client.from('categories').delete().eq('id', parsedId);
+    final parsedId = int.tryParse(id);
+    if (parsedId != null) {
+      await _client.from('categories').delete().eq('id', parsedId);
+    } else {
+      await _client.from('categories').delete().eq('id', id);
+    }
   }
 }

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../transfers/transfer_screen.dart';
 
@@ -27,35 +28,22 @@ class _AccountsScreenState extends State<AccountsScreen> {
       final userId = _supabase.auth.currentUser?.id;
       if (userId == null) return;
 
-      // 1. Fetch Accounts
-      final accResponse = await _supabase
-          .from('accounts')
-          .select()
-          .eq('user_id', userId);
-      final fetchedAccounts = List<Map<String, dynamic>>.from(accResponse);
+      // PERFORMANCE UPGRADE: Concurrent loading for zero-lag fetching
+      final results = await Future.wait<dynamic>([
+        _supabase.from('accounts').select('id, name, type').eq('user_id', userId).order('id'),
+        _supabase.from('transactions').select('type, amount, account_id').eq('user_id', userId),
+        _supabase.from('transfers').select('from_account_id, to_account_id, amount').eq('user_id', userId),
+        _supabase.from('commitments').select('amount, transactions(account_id)').eq('user_id', userId).eq('status', 'deposited'),
+      ]);
 
-      // 2. Fetch Transactions (Income, Expense, Initial Balance)
-      final txResponse = await _supabase
-          .from('transactions')
-          .select('type, amount, account_id')
-          .eq('user_id', userId);
-
-      // 3. Fetch Transfers
-      final transferResponse = await _supabase
-          .from('transfers')
-          .select('from_account_id, to_account_id, amount')
-          .eq('user_id', userId);
-
-      // 4. Fetch Commitments
-      final commitmentsResponse = await _supabase
-          .from('commitments')
-          .select('amount, transactions(account_id)')
-          .eq('user_id', userId)
-          .eq('status', 'deposited');
+      final fetchedAccounts = List<Map<String, dynamic>>.from(results[0] ?? []);
+      final txResponse = (results[1] as List<dynamic>?) ?? [];
+      final transferResponse = (results[2] as List<dynamic>?) ?? [];
+      final commitmentsResponse = (results[3] as List<dynamic>?) ?? [];
 
       Map<String, double> balances = {};
-
-      // Initialize all accounts to 0
+      
+      // Initialize base balances
       for (var acc in fetchedAccounts) {
         balances[acc['id'].toString()] = 0.0;
       }
@@ -63,7 +51,7 @@ class _AccountsScreenState extends State<AccountsScreen> {
       // Add/Subtract Transactions
       for (var tx in txResponse) {
         final acctId = tx['account_id']?.toString();
-        if (acctId == null) continue;
+        if (acctId == null || !balances.containsKey(acctId)) continue;
         
         final amt = (tx['amount'] as num?)?.toDouble() ?? 0.0;
         final type = tx['type']?.toString();
@@ -81,17 +69,23 @@ class _AccountsScreenState extends State<AccountsScreen> {
         final fromId = tr['from_account_id']?.toString();
         final toId = tr['to_account_id']?.toString();
 
-        if (fromId != null) balances[fromId] = (balances[fromId] ?? 0.0) - amt;
-        if (toId != null) balances[toId] = (balances[toId] ?? 0.0) + amt;
+        if (fromId != null && balances.containsKey(fromId)) {
+          balances[fromId] = (balances[fromId] ?? 0.0) - amt;
+        }
+        if (toId != null && balances.containsKey(toId)) {
+          balances[toId] = (balances[toId] ?? 0.0) + amt;
+        }
       }
 
-      // Subtract deposited commitments from source accounts
+      // Deduct active commitments
       for (var c in commitmentsResponse) {
         final amt = (c['amount'] as num?)?.toDouble() ?? 0.0;
         final sourceTx = c['transactions'] as Map<String, dynamic>?;
         if (sourceTx != null && sourceTx['account_id'] != null) {
           final acctId = sourceTx['account_id'].toString();
-          balances[acctId] = (balances[acctId] ?? 0.0) - amt;
+          if (balances.containsKey(acctId)) {
+            balances[acctId] = (balances[acctId] ?? 0.0) - amt;
+          }
         }
       }
 
@@ -108,202 +102,379 @@ class _AccountsScreenState extends State<AccountsScreen> {
     }
   }
 
-  void _showNewAccountDialog() {
-    final nameController = TextEditingController();
-    final balanceController = TextEditingController();
-    String selectedType = 'bank';
-
-    showDialog(
+  void _showNewAccountSheet() {
+    HapticFeedback.lightImpact();
+    showModalBottomSheet(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          title: const Text('New Account'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameController,
-                decoration: const InputDecoration(labelText: 'Account Name'),
-              ),
-              const SizedBox(height: 10),
-              TextField(
-                controller: balanceController,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                decoration: const InputDecoration(labelText: 'Initial Balance (\$)', prefixText: '\$ '),
-              ),
-              const SizedBox(height: 10),
-              DropdownButtonFormField<String>(
-                value: selectedType,
-                decoration: const InputDecoration(labelText: 'Type'),
-                items: const [
-                  DropdownMenuItem(value: 'bank', child: Text('Bank Account')),
-                  DropdownMenuItem(value: 'wallet', child: Text('Cash / Wallet')),
-                ],
-                onChanged: (val) => setDialogState(() => selectedType = val!),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel'),
-            ),
-            ElevatedButton(
-              onPressed: () async {
-                final name = nameController.text.trim();
-                final initialBal = double.tryParse(balanceController.text) ?? 0.0;
-                if (name.isEmpty) return;
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => _AddAccountSheet(
+        onSave: (String name, double initialBal, String type) async {
+          setState(() => _isLoading = true);
+          try {
+            final userId = _supabase.auth.currentUser?.id;
+            if (userId == null) return;
 
-                final userId = _supabase.auth.currentUser?.id;
-                if (userId != null) {
-                  final newAcc = await _supabase.from('accounts').insert({
-                    'user_id': userId,
-                    'name': name,
-                    'type': selectedType,
-                    'current_balance': initialBal,
-                  }).select().single();
+            final newAcc = await _supabase.from('accounts').insert({
+              'user_id': userId,
+              'name': name,
+              'type': type,
+              'current_balance': initialBal, // Fallback schema safety
+            }).select().single();
 
-                  if (initialBal > 0) {
-                    await _supabase.from('transactions').insert({
-                      'user_id': userId,
-                      'account_id': newAcc['id'],
-                      'type': 'initial_balance',
-                      'amount': initialBal,
-                      'title': 'Initial Balance',
-                      'date': DateTime.now().toIso8601String(),
-                    });
-                  }
+            if (initialBal > 0) {
+              await _supabase.from('transactions').insert({
+                'user_id': userId,
+                'account_id': newAcc['id'],
+                'type': 'initial_balance',
+                'amount': initialBal,
+                'title': 'Initial Balance',
+                'date': DateTime.now().toIso8601String(),
+              });
+            }
 
-                  if (mounted) {
-                    Navigator.pop(ctx);
-                    _fetchAccountsAndLiveBalances();
-                  }
-                }
-              },
-              child: const Text('Add Account'),
-            ),
-          ],
-        ),
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Account "$name" created!'), backgroundColor: Colors.green),
+              );
+              _fetchAccountsAndLiveBalances();
+            }
+          } catch (e) {
+            if (mounted) {
+              setState(() => _isLoading = false);
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Error: $e'), backgroundColor: Colors.redAccent),
+              );
+            }
+          }
+        },
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    double totalAllAccounts = _liveBalances.values.fold(0.0, (sum, bal) => sum + bal);
+
     return Scaffold(
+      backgroundColor: const Color(0xFFF8F9FE),
       appBar: AppBar(
-        title: const Text('Account Management'),
+        title: const Text('Accounts', style: TextStyle(fontWeight: FontWeight.bold)),
+        backgroundColor: Colors.transparent,
+        flexibleSpace: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFF2E0854), Color(0xFF5D12D6)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+          ),
+        ),
+        foregroundColor: Colors.white,
+        elevation: 0,
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: _showNewAccountDialog,
-        icon: const Icon(Icons.add),
-        label: const Text('New Account'),
+        onPressed: _showNewAccountSheet,
+        backgroundColor: Colors.deepPurple,
+        foregroundColor: Colors.white,
+        elevation: 4,
+        icon: const Icon(Icons.add_rounded),
+        label: const Text('New Account', style: TextStyle(fontWeight: FontWeight.bold)),
       ),
       body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : SingleChildScrollView(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Card(
-                    elevation: 1,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                    child: Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+          ? const Center(child: CircularProgressIndicator(color: Colors.deepPurple))
+          : RefreshIndicator(
+              onRefresh: _fetchAccountsAndLiveBalances,
+              color: Colors.deepPurple,
+              child: CustomScrollView(
+                physics: const BouncingScrollPhysics(parent: AlwaysScrollableScrollPhysics()),
+                slivers: [
+                  // --- HEADER METRIC ---
+                  SliverToBoxAdapter(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 20),
+                      decoration: const BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [Color(0xFF2E0854), Color(0xFF5D12D6)],
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                        ),
+                        borderRadius: BorderRadius.vertical(bottom: Radius.circular(40)),
+                        boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 10, offset: Offset(0, 4))],
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          const Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Text(
-                                'Internal Transfer',
-                                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                              ),
-                              ElevatedButton.icon(
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.deepPurple,
-                                  foregroundColor: Colors.white,
-                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                                ),
-                                onPressed: () async {
-                                  await Navigator.push(
-                                    context,
-                                    MaterialPageRoute(builder: (_) => const TransferScreen()),
-                                  );
-                                  _fetchAccountsAndLiveBalances();
-                                },
-                                icon: const Icon(Icons.swap_horiz, size: 16),
-                                label: const Text('Transfer Now', style: TextStyle(fontSize: 12)),
-                              ),
+                              Text('Total Liquidity', style: TextStyle(color: Colors.white70, fontSize: 14, fontWeight: FontWeight.w600, letterSpacing: 1.2)),
+                              SizedBox(height: 4),
+                              Text('Across all accounts', style: TextStyle(color: Colors.white54, fontSize: 12)),
                             ],
                           ),
-                          const SizedBox(height: 6),
-                          const Text(
-                            'Move money between wallet & bank accounts',
-                            style: TextStyle(color: Colors.grey, fontSize: 12),
+                          Text(
+                            '\$${totalAllAccounts.toStringAsFixed(2)}',
+                            style: const TextStyle(color: Colors.white, fontSize: 36, fontWeight: FontWeight.w900, letterSpacing: -1),
                           ),
                         ],
                       ),
                     ),
                   ),
 
-                  const SizedBox(height: 20),
-
-                  if (_accounts.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 40),
-                      child: Center(child: Text('No accounts created yet.')),
-                    )
-                  else
-                    ListView.builder(
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      itemCount: _accounts.length,
-                      itemBuilder: (context, index) {
-                        final acc = _accounts[index];
-                        final idStr = acc['id'].toString();
-                        final isBank = acc['type'] == 'bank';
-                        final double balance = _liveBalances[idStr] ?? 0.0;
-
-                        return Card(
-                          margin: const EdgeInsets.only(bottom: 12),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                          child: ListTile(
-                            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                            leading: CircleAvatar(
-                              radius: 24,
-                              backgroundColor: isBank ? Colors.blue.shade100 : Colors.green.shade100,
-                              child: Icon(
-                                isBank ? Icons.account_balance : Icons.account_balance_wallet,
-                                color: isBank ? Colors.blue.shade800 : Colors.green.shade800,
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.all(20.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // --- MODERN TRANSFER BANNER ---
+                          Container(
+                            padding: const EdgeInsets.all(20),
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                colors: [Colors.blue.shade700, Colors.blue.shade500],
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
                               ),
+                              borderRadius: BorderRadius.circular(24),
+                              boxShadow: [BoxShadow(color: Colors.blue.withOpacity(0.3), blurRadius: 15, offset: const Offset(0, 8))],
                             ),
-                            title: Text(
-                              acc['name'] ?? 'Account',
-                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                            ),
-                            subtitle: Text(
-                              isBank ? 'Bank Account' : 'Cash on hand',
-                              style: const TextStyle(color: Colors.grey, fontSize: 12),
-                            ),
-                            trailing: Text(
-                              '\$${balance.toStringAsFixed(2)}',
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 16,
-                                color: balance < 0 ? Colors.red : Colors.grey.shade900,
-                              ),
+                            child: Row(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.all(12),
+                                  decoration: BoxDecoration(color: Colors.white.withOpacity(0.2), shape: BoxShape.circle),
+                                  child: const Icon(Icons.swap_horiz_rounded, color: Colors.white, size: 28),
+                                ),
+                                const SizedBox(width: 16),
+                                const Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text('Internal Transfer', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18)),
+                                      SizedBox(height: 4),
+                                      Text('Move money between wallets', style: TextStyle(color: Colors.white70, fontSize: 12)),
+                                    ],
+                                  ),
+                                ),
+                                ElevatedButton(
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.white,
+                                    foregroundColor: Colors.blue.shade700,
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                    elevation: 0,
+                                  ),
+                                  onPressed: () async {
+                                    HapticFeedback.lightImpact();
+                                    await Navigator.push(context, MaterialPageRoute(builder: (_) => const TransferScreen()));
+                                    _fetchAccountsAndLiveBalances();
+                                  },
+                                  child: const Text('Move', style: TextStyle(fontWeight: FontWeight.bold)),
+                                ),
+                              ],
                             ),
                           ),
-                        );
-                      },
+
+                          const SizedBox(height: 24),
+                          const Text('Your Accounts', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Colors.black87)),
+                          const SizedBox(height: 12),
+
+                          if (_accounts.isEmpty)
+                            Center(
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(vertical: 40),
+                                child: Column(
+                                  children: [
+                                    Icon(Icons.account_balance_wallet_outlined, size: 64, color: Colors.grey[300]),
+                                    const SizedBox(height: 16),
+                                    Text('No accounts found.', style: TextStyle(color: Colors.grey[500], fontSize: 16, fontWeight: FontWeight.w600)),
+                                  ],
+                                ),
+                              ),
+                            )
+                          else
+                            ListView.builder(
+                              shrinkWrap: true,
+                              physics: const NeverScrollableScrollPhysics(),
+                              itemCount: _accounts.length,
+                              itemBuilder: (context, index) {
+                                final acc = _accounts[index];
+                                final idStr = acc['id'].toString();
+                                final isBank = acc['type'] == 'bank';
+                                final double balance = _liveBalances[idStr] ?? 0.0;
+
+                                return Card(
+                                  margin: const EdgeInsets.only(bottom: 12),
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                                  elevation: 0,
+                                  color: Colors.white,
+                                  child: ListTile(
+                                    contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                                    leading: CircleAvatar(
+                                      radius: 26,
+                                      backgroundColor: isBank ? Colors.blue.shade50 : Colors.green.shade50,
+                                      child: Icon(
+                                        isBank ? Icons.account_balance_rounded : Icons.account_balance_wallet_rounded,
+                                        color: isBank ? Colors.blue.shade700 : Colors.green.shade700,
+                                        size: 24,
+                                      ),
+                                    ),
+                                    title: Text(
+                                      acc['name'] ?? 'Account',
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.black87),
+                                    ),
+                                    subtitle: Text(
+                                      isBank ? 'Bank Account' : 'Cash / Wallet',
+                                      style: TextStyle(color: Colors.grey.shade500, fontSize: 13, fontWeight: FontWeight.w500),
+                                    ),
+                                    trailing: Text(
+                                      '\$${balance.toStringAsFixed(2)}',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w800,
+                                        fontSize: 18,
+                                        color: balance < 0 ? Colors.redAccent : Colors.deepPurple,
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          const SizedBox(height: 80), // Fab padding
+                        ],
+                      ),
                     ),
+                  ),
                 ],
               ),
             ),
+    );
+  }
+}
+
+// ----------------------------------------------------------------------
+// PERFORMANCE FIX: Localized Stateful Widget for Add Account BottomSheet
+// Prevents the main screen from rebuilding on every keystroke
+// ----------------------------------------------------------------------
+class _AddAccountSheet extends StatefulWidget {
+  final Function(String name, double initialBal, String type) onSave;
+
+  const _AddAccountSheet({required this.onSave});
+
+  @override
+  State<_AddAccountSheet> createState() => _AddAccountSheetState();
+}
+
+class _AddAccountSheetState extends State<_AddAccountSheet> {
+  final _nameController = TextEditingController();
+  final _balanceController = TextEditingController();
+  String _selectedType = 'bank';
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _balanceController.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    HapticFeedback.lightImpact();
+    final name = _nameController.text.trim();
+    final initialBal = double.tryParse(_balanceController.text) ?? 0.0;
+    
+    if (name.isNotEmpty) {
+      Navigator.pop(context); // Close sheet immediately
+      widget.onSave(name, initialBal, _selectedType);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.of(context).viewInsets.bottom,
+      ),
+      child: Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
+        ),
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(10))),
+            const SizedBox(height: 24),
+            const Text('Create New Account', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: Colors.black87)),
+            const SizedBox(height: 24),
+            TextField(
+              controller: _nameController,
+              autofocus: true,
+              style: const TextStyle(fontWeight: FontWeight.w600),
+              textInputAction: TextInputAction.next,
+              decoration: InputDecoration(
+                labelText: 'Account Name',
+                hintText: 'e.g. Chase Checking',
+                prefixIcon: const Icon(Icons.account_balance_rounded, color: Colors.deepPurple),
+                filled: true,
+                fillColor: Colors.grey.shade50,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
+              ),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _balanceController,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 18),
+              textInputAction: TextInputAction.done,
+              decoration: InputDecoration(
+                labelText: 'Initial Balance',
+                prefixIcon: const Icon(Icons.attach_money_rounded, color: Colors.deepPurple),
+                filled: true,
+                fillColor: Colors.grey.shade50,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
+              ),
+            ),
+            const SizedBox(height: 16),
+            DropdownButtonFormField<String>(
+              value: _selectedType,
+              icon: const Icon(Icons.keyboard_arrow_down_rounded, color: Colors.grey),
+              decoration: InputDecoration(
+                labelText: 'Account Type',
+                prefixIcon: const Icon(Icons.category_rounded, color: Colors.deepPurple),
+                filled: true,
+                fillColor: Colors.grey.shade50,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
+              ),
+              items: const [
+                DropdownMenuItem(value: 'bank', child: Text('Bank Account', style: TextStyle(fontWeight: FontWeight.bold))),
+                DropdownMenuItem(value: 'wallet', child: Text('Cash / Wallet', style: TextStyle(fontWeight: FontWeight.bold))),
+              ],
+              onChanged: (val) {
+                if (val != null) setState(() => _selectedType = val);
+              },
+            ),
+            const SizedBox(height: 30),
+            SizedBox(
+              width: double.infinity,
+              height: 55,
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.deepPurple,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                  elevation: 4,
+                  shadowColor: Colors.deepPurple.withOpacity(0.3),
+                ),
+                onPressed: _submit,
+                child: const Text('Add Account', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, letterSpacing: 0.5)),
+              ),
+            ),
+            const SizedBox(height: 10),
+          ],
+        ),
+      ),
     );
   }
 }

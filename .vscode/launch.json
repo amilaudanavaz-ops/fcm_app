@@ -10,7 +10,7 @@
             "name": "fcm_app",
             "request": "launch",
             "type": "dart",
-            "deviceId": "R58R60ER2BE"
+            "deviceId": "emulator-5554 "
         },
         {
             "name": "fcm_app",
